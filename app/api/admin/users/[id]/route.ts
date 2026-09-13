@@ -82,6 +82,7 @@ export async function PUT(
       display_name: body.displayName,
       password_hash: passwordHash,
       is_admin: body.isAdmin !== undefined ? (body.isAdmin ? 1 : 0) : undefined,
+      studio_view: body.studioView !== undefined ? (body.studioView ? 1 : 0) : undefined,
     });
 
     return NextResponse.json({ success: true });

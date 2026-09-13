@@ -8,9 +8,10 @@
 import { Project, VirtualFile, FileTreeNode, CustomTemplate, EdgeFunction, ServerFunction, Secret, ScheduledFunction } from '../types';
 import { Skill } from '../skills/types';
 import { StorageAdapter } from './types';
+import { FALLBACK_RUNTIME, normalizeProjectSettings, settingsNeedNormalizing } from '../project-settings';
 
 const DEFAULT_DB_NAME = 'osw-studio-db';
-const DB_VERSION = 6; // Migrate runtime 'static' → 'handlebars' for existing projects/templates
+const DB_VERSION = 8; // v8: repair malformed project settings and fill in a missing runtime
 
 export class IndexedDBAdapter implements StorageAdapter {
   private db: IDBDatabase | null = null;
@@ -131,11 +132,16 @@ export class IndexedDBAdapter implements StorageAdapter {
               const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
               if (cursor) {
                 const project = cursor.value;
-                if (!project.settings?.runtime || project.settings.runtime === 'static') {
-                  project.settings = project.settings || {};
-                  project.settings.runtime = 'handlebars';
-                  cursor.update(project);
+                // Normalized before the field is read or written. `project.settings` is not
+                // always the record the type says: a stored JSON string is truthy, so
+                // `settings || {}` kept it and the assignment below threw TypeError on a string
+                // primitive -- aborting this cursor and leaving every later project unmigrated.
+                const settings = normalizeProjectSettings(project.settings);
+                if (!settings.runtime || settings.runtime === 'static') {
+                  settings.runtime = 'handlebars';
                 }
+                project.settings = settings;
+                cursor.update(project);
                 cursor.continue();
               }
             };
@@ -155,6 +161,40 @@ export class IndexedDBAdapter implements StorageAdapter {
               }
             };
           }
+        }
+
+        // v8: Repair project settings that are not the record the type says, and fill in a runtime.
+        //
+        // Reading them is already normalized (`hydrateProject`), so this is about what is *stored*:
+        // until a project is written back through a path that normalizes, its row keeps a JSON
+        // string, stacked encoding layers, or the character keys a spread left behind -- and
+        // anything reading the row directly still sees them.
+        //
+        // Separate from v6 rather than folded into it: v6 has already run for existing installs,
+        // and the projects its cursor never reached because of the throw above are exactly the ones
+        // that need this.
+        if (oldVersion < 8 && db.objectStoreNames.contains('projects')) {
+          const tx = (event.target as IDBOpenDBRequest).transaction!;
+          const projectStore = tx.objectStore('projects');
+          projectStore.openCursor().onsuccess = (e) => {
+            const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+            if (!cursor) return;
+            const project = cursor.value;
+            const settings = normalizeProjectSettings(project.settings);
+            // A missing runtime is filled in, not only a malformed record. This is what v6 set out
+            // to do; the projects it never reached because its cursor threw are exactly the ones
+            // still without one, and they have been rendered as the fallback ever since. Writing it
+            // down is also what stops a checkpoint from capturing "no runtime" and a later restore
+            // from deleting a choice made after it.
+            if (!settings.runtime) settings.runtime = FALLBACK_RUNTIME;
+            if (settingsNeedNormalizing(project.settings) || project.settings?.runtime !== settings.runtime) {
+              // updatedAt is deliberately not touched: a migration is not an edit, and bumping it
+              // would show every project in the workspace as "Local newer" in Server Sync.
+              project.settings = settings;
+              cursor.update(project);
+            }
+            cursor.continue();
+          };
         }
       };
     });
@@ -618,7 +658,11 @@ export class IndexedDBAdapter implements StorageAdapter {
       lastSavedAt: project.lastSavedAt ? new Date(project.lastSavedAt) : null,
       previewUpdatedAt: project.previewUpdatedAt ? new Date(project.previewUpdatedAt) : undefined,
       lastSyncedAt: project.lastSyncedAt ? new Date(project.lastSyncedAt) : null,
-      serverUpdatedAt: project.serverUpdatedAt ? new Date(project.serverUpdatedAt) : null
+      serverUpdatedAt: project.serverUpdatedAt ? new Date(project.serverUpdatedAt) : null,
+      // Same reason as the dates above, and the same write-back: a project stored from an API
+      // response holds whatever that response held, and for settings that has meant a JSON string.
+      // See lib/vfs/project-settings.ts.
+      settings: normalizeProjectSettings(project.settings)
     };
   }
 

@@ -6,7 +6,8 @@ export async function grepCommand(env: ShellEnv): Promise<ShellResult> {
   const { vfs, projectId, args, stdin, ctx, redirect } = env;
 
           // Supported: grep [-n] [-i] [-o] [-F] [-P] [-A num] [-B num] [-C num] pattern path  (always recursive)
-          const flags: Record<string, any> = { n: false, i: false, o: false, F: false, C: 0, A: 0, B: 0 };
+          const flags: Record<string, any> = { n: false, i: false, o: false, F: false, c: false, l: false, C: 0, A: 0, B: 0 };
+          const unknownFlags: string[] = [];
           const fargs: string[] = [];
           for (let i = 0; i < args.length; i++) {
             const a = args[i];
@@ -19,14 +20,28 @@ export async function grepCommand(env: ShellEnv): Promise<ShellResult> {
                 else if (ch === 'o') flags.o = true;
                 else if (ch === 'F') flags.F = true;
                 else if (ch === 'P') {} // no-op — JS regex covers most PCRE patterns
+                else if (ch === 'c') flags.c = true;
+                else if (ch === 'l') flags.l = true;
                 else if (ch === 'C') { flags.C = parseInt(args[++i]) || 2; break; }
                 else if (ch === 'A') { flags.A = parseInt(args[++i]) || 2; break; }
                 else if (ch === 'B') { flags.B = parseInt(args[++i]) || 2; break; }
+                // An unsupported flag used to be dropped silently, so `grep -c` printed matching
+                // lines and read as a count of one. Fail loudly instead — a wrong-shaped result
+                // is worse than no result.
+                else unknownFlags.push(`-${ch}`);
               }
             } else {
               fargs.push(a);
             }
           }
+          if (unknownFlags.length > 0) {
+            return {
+              stdout: '',
+              stderr: `grep: unsupported flag${unknownFlags.length > 1 ? 's' : ''}: ${unknownFlags.join(', ')}\n\n  Supported: -n -i -o -F -P -c -l -A NUM -B NUM -C NUM\n  Run grep with no pattern for full usage.`,
+              exitCode: 2
+            };
+          }
+
           const pattern = fargs[0];
           const path = normalizePath(fargs[1]) || '/';
           if (!pattern) {
@@ -42,6 +57,8 @@ export async function grepCommand(env: ShellEnv): Promise<ShellResult> {
     -o      Print only the matched parts of each line (one per line)
     -F      Treat pattern as literal string (not regex)
     -P      Perl-compatible regex (accepted, JS regex used)
+    -c      Print the count of matching lines instead of the lines
+    -l      Print only the paths of files that contain a match
     -A NUM  Show NUM lines after each match
     -B NUM  Show NUM lines before each match
     -C NUM  Show NUM lines of context (before and after)
@@ -72,6 +89,50 @@ export async function grepCommand(env: ShellEnv): Promise<ShellResult> {
           const outLines: string[] = [];
           const hasContext = flags.C > 0 || flags.A > 0 || flags.B > 0;
           const globalRegex = flags.o ? new RegExp(regex.source, regex.flags + 'g') : null;
+
+          // -c / -l count or name whole matching lines, so they ignore -o and the context flags
+          // rather than post-processing the formatted output those produce.
+          if (flags.c || flags.l) {
+            const countLines = (content: string) =>
+              content.split(/\r?\n/).reduce((n, line) => (regex.test(line) ? n + 1 : n), 0);
+
+            const lines: string[] = [];
+            if (!fargs[1] && stdin !== undefined) {
+              const n = countLines(stdin);
+              if (flags.l) { if (n > 0) lines.push('(standard input)'); }
+              else lines.push(String(n));
+            } else {
+              const entries = await vfs.getAllFilesAndDirectories(projectId, { includeTransient: true });
+              const dirPrefix = path === '/' ? '/' : (path.endsWith('/') ? path : path + '/');
+              const counts: Array<{ path: string; n: number }> = [];
+              for (const entry of entries) {
+                // Both members carry `type`, so the literal check narrows the union on its own.
+                if (entry.type === 'directory') continue;
+                if (!entry.path.startsWith(dirPrefix) && entry.path !== path) continue;
+                if (typeof entry.content !== 'string') continue;
+                counts.push({ path: entry.path, n: countLines(entry.content) });
+              }
+
+              // A path naming one file reports a bare count, as grep does — including the zero.
+              // Suppressing zeroes here is what made `grep -c missing /file` answer with silence.
+              const single = counts.length === 1 && counts[0].path === path;
+              if (flags.l) {
+                for (const c of counts) if (c.n > 0) lines.push(c.path);
+              } else if (single) {
+                lines.push(String(counts[0].n));
+              } else {
+                for (const c of counts) if (c.n > 0) lines.push(`${c.path}:${c.n}`);
+              }
+            }
+
+            const result: ShellResult = {
+              stdout: truncate(lines.join('\n')),
+              stderr: '',
+              exitCode: 0
+            };
+            if (redirect) return applyRedirectGuarded(vfs, projectId, result.stdout, redirect, ctx);
+            return result;
+          }
 
           // If no file path provided and stdin is available, search stdin
           if (!fargs[1] && stdin !== undefined) {
@@ -111,18 +172,17 @@ export async function grepCommand(env: ShellEnv): Promise<ShellResult> {
           } else {
             const entries = await vfs.getAllFilesAndDirectories(projectId, { includeTransient: true });
             const dirPrefix = path === '/' ? '/' : (path.endsWith('/') ? path : path + '/');
-            for (const e of entries) {
-              if ('type' in e && e.type === 'directory') continue;
-              const file = e as any;
-              if (!file.path.startsWith(dirPrefix) && file.path !== path) continue;
-              if (typeof file.content !== 'string') continue;
-              const lines = file.content.split(/\r?\n/);
+            for (const entry of entries) {
+              if (entry.type === 'directory') continue;
+              if (!entry.path.startsWith(dirPrefix) && entry.path !== path) continue;
+              if (typeof entry.content !== 'string') continue;
+              const lines = entry.content.split(/\r?\n/);
 
               if (flags.o) {
                 for (let i = 0; i < lines.length; i++) {
                   const matches = [...lines[i].matchAll(globalRegex!)];
                   for (const m of matches) {
-                    outLines.push(`${file.path}${flags.n ? ':' + (i + 1) : ''}:${m[0]}`);
+                    outLines.push(`${entry.path}${flags.n ? ':' + (i + 1) : ''}:${m[0]}`);
                   }
                 }
               } else if (hasContext) {
@@ -144,12 +204,12 @@ export async function grepCommand(env: ShellEnv): Promise<ShellResult> {
                 const sortedLines = Array.from(contextLines).sort((a, b) => a - b);
                 if (outLines.length > 0) outLines.push(''); // separator between files
                 for (const lineNum of sortedLines) {
-                  outLines.push(`${file.path}${flags.n ? ':' + (lineNum + 1) : ''}:${lines[lineNum]}`);
+                  outLines.push(`${entry.path}${flags.n ? ':' + (lineNum + 1) : ''}:${lines[lineNum]}`);
                 }
               } else {
                 for (let i = 0; i < lines.length; i++) {
                   if (regex.test(lines[i])) {
-                    outLines.push(`${file.path}${flags.n ? ':' + (i + 1) : ''}:${lines[i]}`);
+                    outLines.push(`${entry.path}${flags.n ? ':' + (i + 1) : ''}:${lines[i]}`);
                   }
                 }
               }

@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 
 import { getSession } from '@/lib/auth/session';
-import { getUserDefaultWorkspace, verifyWorkspaceAccess } from '@/lib/auth/system-database';
+import { getUserById, getUserDefaultWorkspace, verifyWorkspaceAccess } from '@/lib/auth/system-database';
+import { ViewModeProvider } from '@/components/view-mode-provider';
 
 /**
  * Membership check for every page under /w/{workspaceId}.
@@ -41,5 +42,9 @@ export default async function WorkspaceLayout({
     redirect(fallback && fallback !== workspaceId ? `/w/${fallback}/projects` : '/admin/login');
   }
 
-  return <>{children}</>;
+  // Decided here so the first HTML already carries the right menu. The sidebar cannot work this out
+  // on its own: it renders on the server too, where there is no localStorage to read it from.
+  const studioView = (getUserById(session.userId)?.studio_view ?? 1) === 1;
+
+  return <ViewModeProvider initialStudioView={studioView}>{children}</ViewModeProvider>;
 }

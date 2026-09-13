@@ -28,6 +28,7 @@ import type {
   Secret,
   ServerFunction,
 } from './types';
+import { normalizeProjectSettings } from './project-settings';
 import type { StorageAdapter } from './adapters/types';
 import { logger } from '@/lib/utils';
 
@@ -143,7 +144,9 @@ export async function captureBackend(
     const secrets: CheckpointSecret[] = liveSecrets.map(({ value: _value, ...rest }) => rest);
 
     const project = await vfs.getProject(projectId);
-    const source = project?.settings;
+    // Normalized, so a snapshot records what the project actually has rather than `undefined` for
+    // every field of settings that was stored as a JSON string.
+    const source = normalizeProjectSettings(project?.settings);
     // Spelled out per field rather than looped over the key list: a loop assigns through a union
     // of keys, which only typechecks behind a cast, and four fields do not need one.
     const settings: CheckpointProjectSettings = {
@@ -308,7 +311,7 @@ async function restoreSettings(
   const project = await vfs.getProject(projectId);
   if (!project) return;
 
-  const current = project.settings ?? {};
+  const current = normalizeProjectSettings(project.settings);
   const next = { ...current };
   let changed = false;
 
@@ -323,7 +326,17 @@ async function restoreSettings(
     else next[key] = wanted;
   };
 
-  apply('runtime');
+  /**
+   * The runtime is restored when the checkpoint names one, and left alone when it does not.
+   *
+   * Unlike the other three, a project is never *meant* to have no runtime -- it decides how the
+   * project is compiled, and absent it every consumer falls back. So "the checkpoint carries none"
+   * does not distinguish a project that had no runtime from a snapshot that could not read one,
+   * and older snapshots are full of the latter: capture reads `project.settings?.runtime`, which is
+   * `undefined` for settings stored as a JSON string (see lib/vfs/project-settings.ts). Deleting on
+   * that answer is what made a runtime look like it reset itself after an undo.
+   */
+  if (settings.runtime !== undefined) apply('runtime');
   apply('previewEntryPoint');
   apply('globalStyles');
   apply('databaseSchema');

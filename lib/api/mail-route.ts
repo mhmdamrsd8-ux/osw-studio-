@@ -16,7 +16,6 @@ import 'server-only';
 
 import { NextResponse } from 'next/server';
 import { requireAuth, type SessionData } from '@/lib/auth/session';
-import { verifyWorkspaceAccess } from '@/lib/auth/system-database';
 import { isSmtpSecurity, type SmtpSecurity } from '@/lib/mail/settings';
 
 export interface SmtpFields {
@@ -133,14 +132,7 @@ export async function requireAdmin(): Promise<SessionData> {
   return session;
 }
 
-export async function requireWorkspaceOwner(
-  params: Promise<{ workspaceId: string }>
-): Promise<{ session: SessionData; workspaceId: string }> {
-  const session = await requireAuth();
-  const { workspaceId } = await params;
-  verifyWorkspaceAccess(session.userId, workspaceId, 'owner');
-  return { session, workspaceId };
-}
+export { requireWorkspaceOwner } from '@/lib/api/workspace-context';
 
 /**
  * Maps the guard failures onto status codes, and refuses to say anything else about the error.

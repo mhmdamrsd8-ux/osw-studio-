@@ -1,8 +1,19 @@
 import { StateCreator } from 'zustand';
 
-type MobilePanelType = 'chat' | 'files' | 'editor' | 'preview' | 'checkpoints' | 'console' | 'skills' | 'debug';
+type MobilePanelType = 'chat' | 'files' | 'editor' | 'preview' | 'elements' | 'checkpoints' | 'console' | 'skills' | 'debug';
 
-const DEFAULT_PANEL_ORDER = ['chat', 'files', 'editor', 'skills', 'console', 'preview', 'elements', 'checkpoints', 'debug'];
+/**
+ * Left to right, for whichever panels are open.
+ *
+ * Chat and preview lead because they are the pair that stays open: the work is asking for a change
+ * and looking at the result, and everything else is opened to answer a question and closed again.
+ * Order decides eviction as well as position, since `pickEvictionTarget` walks from the right, so
+ * putting them first is what makes a third panel take the third slot instead of replacing preview.
+ *
+ * Only the default. A saved order wins (`loadPanelOrder`), so this changes nothing for anyone who
+ * already has one.
+ */
+const DEFAULT_PANEL_ORDER = ['chat', 'preview', 'files', 'editor', 'skills', 'console', 'elements', 'checkpoints', 'debug'];
 
 export interface LayoutSlice {
   showChat: boolean;

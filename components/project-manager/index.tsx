@@ -103,6 +103,11 @@ type SortOption = 'updated' | 'created' | 'name';
 
 export function ProjectManager({ onProjectSelect, hideHeader = false, hideFooter = false, autoCreate = false, workspaceId }: ProjectManagerProps) {
   const router = useRouter();
+  // Offered only where the route exists. In the simple view the row already opens quick edit, so
+  // this is the studio's way in: the fast path for a small change without opening four panels.
+  const openQuickEdit = workspaceId && process.env.NEXT_PUBLIC_SERVER_MODE === 'true'
+    ? (project: Project) => router.push(`/w/${workspaceId}/quick/${project.id}`)
+    : undefined;
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -863,6 +868,7 @@ export function ProjectManager({ onProjectSelect, hideHeader = false, hideFooter
                                   onPreview={setPreviewProject}
                                   onExportAsTemplate={setTemplateExportProject}
                                   onBackend={setBackendProject}
+                                  onQuickEdit={openQuickEdit}
                                   onUpdate={handleProjectUpdate}
                                 />
                               );

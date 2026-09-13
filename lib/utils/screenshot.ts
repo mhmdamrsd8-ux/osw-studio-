@@ -1,4 +1,5 @@
 import html2canvas from 'html2canvas';
+import { domToCanvas } from 'modern-screenshot';
 import { logger } from '@/lib/utils';
 import { TOOLBAR_HOST_ATTR } from '@/lib/preview/toolbar-dom';
 
@@ -104,6 +105,42 @@ export async function waitForResources(doc: Document, minDelay = 2000, timeout =
   ]);
 }
 
+const RENDER_TIMEOUT_MS = 6000;
+
+/**
+ * Paint the document with the browser's own engine.
+ *
+ * The page is serialised into an SVG `foreignObject` and drawn to a canvas, so whatever the preview
+ * can display, the capture can too: `oklch` colours, gradients interpolated in `oklab`, `color-mix`.
+ * html2canvas repaints CSS in JavaScript and has none of those, which is why it turned this site's
+ * gradients into slate. Same-origin assets inline as they are; a hot-linked image needs CORS to
+ * appear, as it did before.
+ */
+async function renderWithBrowser(
+  iframeDoc: Document,
+  captureWidth: number,
+  height: number,
+): Promise<HTMLCanvasElement> {
+  // The page is painted as it is laid out, at the frame's own width. html2canvas could relayout a
+  // clone at a requested width; a serialised document cannot, and asking for a wider canvas only
+  // adds a white gutter beside the page. A frame narrower than the requested width is painted at
+  // up to twice its size instead, so the output does not have to be stretched to reach it.
+  const width = Math.max(iframeDoc.documentElement.clientWidth, iframeDoc.body.scrollWidth, 1);
+  const scale = width < captureWidth ? Math.min(2, captureWidth / width) : 1;
+  const canvas = await domToCanvas(iframeDoc.documentElement, {
+    width,
+    height,
+    scale,
+    backgroundColor: '#ffffff',
+    timeout: 3000,
+    // The selection toolbar lives inside the previewed document and stays visible while an element
+    // is selected; it is not part of the page.
+    filter: (node) => !(node instanceof Element && node.hasAttribute(TOOLBAR_HOST_ATTR)),
+  });
+  if (canvas.width === 0 || canvas.height === 0) throw new Error('empty canvas');
+  return canvas;
+}
+
 /**
  * Internal function to attempt screenshot capture
  */
@@ -134,6 +171,19 @@ async function attemptCapture(
 
   logger.debug('[Screenshot] Capture dimensions:', captureWidth, 'x', effectiveHeight);
 
+  // The browser's own painter first; html2canvas, with its clone-time flattening, only when that
+  // fails outright, which is what an engine without dependable foreignObject rendering looks like.
+  try {
+    return await Promise.race([
+      renderWithBrowser(iframeDoc, captureWidth, effectiveHeight),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`foreignObject render timeout after ${RENDER_TIMEOUT_MS}ms`)), RENDER_TIMEOUT_MS)
+      ),
+    ]);
+  } catch (error) {
+    logger.warn('[Screenshot] Browser render failed, falling back to html2canvas:', error);
+  }
+
   return Promise.race([
     html2canvas(iframeDoc.body, {
         width: captureWidth,
@@ -163,7 +213,8 @@ export async function captureIframeScreenshot(
   captureWidth: number = 1280,
   captureHeight: number = 720,
   outputWidth: number = 640,
-  outputHeight: number = 360,
+  // Unused: the output height follows the captured aspect ratio, not a requested one.
+  _outputHeight: number = 360,
   quality: number = 0.8,
   fullPage: boolean = true,
   waitForContent: boolean = false,
@@ -206,11 +257,14 @@ export async function captureIframeScreenshot(
     }
 
     // Scale down the captured image maintaining aspect ratio
+    // Never wider than what was painted: a narrow frame gives a narrow, sharp image, not a
+    // stretched one.
+    const targetWidth = Math.min(outputWidth, canvas.width);
     const aspectRatio = canvas.height / canvas.width;
-    const scaledHeight = Math.round(outputWidth * aspectRatio);
+    const scaledHeight = Math.round(targetWidth * aspectRatio);
 
     const scaledCanvas = document.createElement('canvas');
-    scaledCanvas.width = outputWidth;
+    scaledCanvas.width = targetWidth;
     scaledCanvas.height = scaledHeight;
     const ctx = scaledCanvas.getContext('2d');
 
@@ -220,7 +274,7 @@ export async function captureIframeScreenshot(
     }
 
     // Draw the captured image scaled down maintaining aspect ratio
-    ctx.drawImage(canvas, 0, 0, outputWidth, scaledHeight);
+    ctx.drawImage(canvas, 0, 0, targetWidth, scaledHeight);
 
     // Convert scaled canvas to base64 JPEG
     const dataUrl = scaledCanvas.toDataURL('image/jpeg', quality);

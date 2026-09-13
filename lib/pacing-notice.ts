@@ -6,7 +6,7 @@
  * to show a calm reassurance banner: a WRITE tool call that has been in progress
  * longer than the threshold, unless the notice has been permanently dismissed.
  *
- * Kept free of the classifyBashCommand import graph: the caller supplies the
+ * Kept free of the command classifier's import graph: the caller supplies the
  * isWrite predicate so this stays trivially testable.
  */
 export interface PacingToolItem {

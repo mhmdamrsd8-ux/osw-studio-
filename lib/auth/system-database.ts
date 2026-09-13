@@ -37,6 +37,8 @@ export interface SystemUser {
   display_name: string | null;
   is_admin: number;
   active: number;
+  /** 0 shows the simple view: projects and deployments, and a project opens in quick edit. */
+  studio_view: number;
   default_workspace_id: string | null;
   created_at: string;
   updated_at: string;
@@ -237,6 +239,15 @@ function initSystemSchema(db: Database.Database): void {
     db.prepare('ALTER TABLE workspace_mail ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0').run();
   }
 
+  // Migration: add users.studio_view if missing. Defaults to 1 so every account that predates the
+  // simple view keeps the studio it has been using; only a member added through the workspace users
+  // page is seeded with 0.
+  try {
+    db.prepare('SELECT studio_view FROM users LIMIT 0').get();
+  } catch {
+    db.prepare('ALTER TABLE users ADD COLUMN studio_view INTEGER NOT NULL DEFAULT 1').run();
+  }
+
   // Migration: raise old restrictive workspace defaults (3/1/100) to generous values.
   // Quota enforcement now runs in all server mode, not only managed mode, so workspaces
   // created with the old defaults would hit limits their admin never chose. Managed
@@ -255,13 +266,18 @@ function initSystemSchema(db: Database.Database): void {
 /**
  * Create a new user. Returns the user ID.
  */
-export function createUser(email: string, passwordHash: string, displayName?: string): string {
+export function createUser(
+  email: string,
+  passwordHash: string,
+  displayName?: string,
+  studioView: number = 1
+): string {
   const db = getSystemDatabase();
   const id = randomUUID();
   db.prepare(`
-    INSERT INTO users (id, email, password_hash, display_name)
-    VALUES (?, ?, ?, ?)
-  `).run(id, email.toLowerCase().trim(), passwordHash, displayName || null);
+    INSERT INTO users (id, email, password_hash, display_name, studio_view)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, email.toLowerCase().trim(), passwordHash, displayName || null, studioView);
 
   enqueueEvent('user.created', { userId: id, email: email.toLowerCase().trim(), displayName: displayName || null });
 
@@ -310,7 +326,7 @@ export function deactivateUser(id: string): void {
 export function listUsers(): Omit<SystemUser, 'password_hash'>[] {
   const db = getSystemDatabase();
   return db.prepare(`
-    SELECT id, email, display_name, is_admin, active,
+    SELECT id, email, display_name, is_admin, active, studio_view,
            default_workspace_id, created_at, updated_at
     FROM users ORDER BY created_at DESC
   `).all() as Omit<SystemUser, 'password_hash'>[];
@@ -319,7 +335,7 @@ export function listUsers(): Omit<SystemUser, 'password_hash'>[] {
 /**
  * Update user properties
  */
-export function updateUser(id: string, updates: { display_name?: string; active?: number; password_hash?: string; is_admin?: number }): void {
+export function updateUser(id: string, updates: { display_name?: string; active?: number; password_hash?: string; is_admin?: number; studio_view?: number }): void {
   const db = getSystemDatabase();
   const setClauses: string[] = ["updated_at = datetime('now')"];
   const values: (string | number)[] = [];
@@ -328,6 +344,7 @@ export function updateUser(id: string, updates: { display_name?: string; active?
   if (updates.active !== undefined) { setClauses.push('active = ?'); values.push(updates.active); }
   if (updates.password_hash !== undefined) { setClauses.push('password_hash = ?'); values.push(updates.password_hash); }
   if (updates.is_admin !== undefined) { setClauses.push('is_admin = ?'); values.push(updates.is_admin); }
+  if (updates.studio_view !== undefined) { setClauses.push('studio_view = ?'); values.push(updates.studio_view); }
 
   values.push(id);
   db.prepare(`UPDATE users SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
@@ -479,7 +496,10 @@ export function getWorkspaceAccess(userId: string, workspaceId: string): Workspa
 export interface WorkspaceMember {
   userId: string;
   email: string;
+  displayName: string | null;
   role: 'owner' | 'editor' | 'viewer';
+  studioView: number;
+  createdAt: string;
 }
 
 /**
@@ -491,14 +511,24 @@ export interface WorkspaceMember {
 export function listWorkspaceMembers(workspaceId: string): WorkspaceMember[] {
   const db = getSystemDatabase();
   const rows = db.prepare(`
-    SELECT wa.user_id, wa.role, u.email
+    SELECT wa.user_id, wa.role, wa.created_at, u.email, u.display_name, u.studio_view
     FROM workspace_access wa
     JOIN users u ON u.id = wa.user_id
     WHERE wa.workspace_id = ? AND u.active = 1
     ORDER BY wa.created_at ASC
-  `).all(workspaceId) as { user_id: string; role: WorkspaceMember['role']; email: string }[];
+  `).all(workspaceId) as {
+    user_id: string; role: WorkspaceMember['role']; created_at: string;
+    email: string; display_name: string | null; studio_view: number;
+  }[];
 
-  return rows.map(row => ({ userId: row.user_id, email: row.email, role: row.role }));
+  return rows.map(row => ({
+    userId: row.user_id,
+    email: row.email,
+    displayName: row.display_name,
+    role: row.role,
+    studioView: row.studio_view,
+    createdAt: row.created_at,
+  }));
 }
 
 /**

@@ -5,6 +5,7 @@
  * React rendering. The ChatPanel hooks into this via process() on each render.
  */
 import type { DebugEvent } from '@/lib/stores/types';
+import { classifyCommand } from '@/lib/agent-activity/classify-command';
 import { INCOMPLETE_PREFIX } from '@/lib/interview/completion';
 
 export interface ToolCall {
@@ -65,20 +66,19 @@ function extractPartialCmd(raw: string): string | null {
   }
 }
 
-export function classifyBashCommand(cmd: string | string[] | undefined): 'bash' | 'write' | 'status' | 'agent' {
-  if (!cmd) return 'bash';
-  const s = (Array.isArray(cmd) ? cmd.join(' ') : String(cmd)).trimStart();
-  if (/^(?:agent|delegate)\b/.test(s)) return 'agent';
-  if (/^status\b/.test(s)) return 'status';
-  if (/^build\b/.test(s)) return 'status';
-  if (/^cat\s*>/.test(s)) return 'write';
-  if (/^cat\b/.test(s) && /(?<![2&])>>?\s*\//.test(s)) return 'write';
-  if (/^sed\s+-i\b/.test(s)) return 'write';
-  if (/^ss\b/.test(s)) return 'write';
-  if (/^(mkdir|touch|rm|mv|cp)\b/.test(s)) return 'write';
-  if (/^echo\b/.test(s) && /(?<![2&])>>?\s*\//.test(s)) return 'write';
-  if (/<<-?\s*['"]?\w+/.test(s)) return 'write';
-  return 'bash';
+/**
+ * Whether a user-role message came from the harness rather than the person.
+ *
+ * Reminders, nudges and retries are sent as user messages so they steer the model, and the interview
+ * gate's incomplete feedback is too; none of them are anything a person typed, so no surface renders
+ * them as one. Kept here, beside the transcript that first needed it, and imported by anything else
+ * that cuts the stream by request.
+ */
+export function isInjectedUserMessage(content: unknown): boolean {
+  if (typeof content !== 'string') return false;
+  return content.includes('<automated_reminder>')
+    || content.includes('Before finishing, run the status command')
+    || content.includes(INCOMPLETE_PREFIX);
 }
 
 function freshState(): ProcessorState {
@@ -436,14 +436,7 @@ export class EventProcessor {
           if (event.version) this.lastEventVersions.set(event.id, event.version);
           const message = event.data?.message;
           if (message?.role === 'user') {
-            // Harness-injected reminders/nudges/retries are wrapped in
-            // <automated_reminder>; they steer the model but are not user input,
-            // so never render them as user messages.
-            if (message.content?.includes('<automated_reminder>')) break;
-            if (message.content?.includes('Before finishing, run the status command')) break;
-          // The interview gate's incomplete feedback is surfaced via the
-          // interview_gate item — don't also render it as a user message.
-          if (message.content?.includes(INCOMPLETE_PREFIX)) break;
+            if (isInjectedUserMessage(message.content)) break;
             const isSyntheticError = message.ui_metadata?.isSyntheticError === true;
             if (!isSyntheticError && state.currentTurn.items.length > 0) {
               state.result.push(state.currentTurn);
@@ -636,9 +629,9 @@ export class EventProcessor {
           if (typeof pti === 'number') {
             agentTool = state.currentIterationTools[pti];
           }
-          if (!agentTool || classifyBashCommand(agentTool.parameters?.command ?? agentTool.parameters?.cmd) !== 'agent') {
+          if (!agentTool || classifyCommand(agentTool.parameters?.command ?? agentTool.parameters?.cmd) !== 'agent') {
             agentTool = state.currentIterationTools.find(
-              t => t.status === 'executing' && classifyBashCommand(t.parameters?.command ?? t.parameters?.cmd) === 'agent'
+              t => t.status === 'executing' && classifyCommand(t.parameters?.command ?? t.parameters?.cmd) === 'agent'
             );
           }
           if (!agentTool) break;

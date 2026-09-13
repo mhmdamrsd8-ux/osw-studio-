@@ -747,11 +747,15 @@ function unescapeHtmlEntities(cmd: string): string {
 export function parseBashCommand(cmdStr: string): string[] {
   const args: string[] = [];
   const wasQuoted: boolean[] = [];
+  // Offset in each token just past its final closing quote. Everything from there on was typed
+  // unquoted, so it is the only part an operator may be split out of.
+  const quotedEnds: number[] = [];
   let current = '';
   let inQuotes = false;
   let quoteChar = '';
   let escaped = false;
   let argWasQuoted = false;
+  let quotedEnd = 0;
 
   for (let i = 0; i < cmdStr.length; i++) {
     const char = cmdStr[i];
@@ -766,6 +770,7 @@ export function parseBashCommand(cmdStr: string): string[] {
       if (char === quoteChar) {
         inQuotes = false;
         quoteChar = '';
+        quotedEnd = current.length;
       } else if (quoteChar === '"' && char === '\\') {
         // Double quotes: only \" and \\ are escape sequences; other backslashes are literal
         const next = cmdStr[i + 1];
@@ -791,8 +796,10 @@ export function parseBashCommand(cmdStr: string): string[] {
         if (current.length > 0 || argWasQuoted) {
           args.push(current);
           wasQuoted.push(argWasQuoted);
+          quotedEnds.push(quotedEnd);
           current = '';
           argWasQuoted = false;
+          quotedEnd = 0;
         }
       } else {
         current += char;
@@ -803,9 +810,10 @@ export function parseBashCommand(cmdStr: string): string[] {
   if (current.length > 0 || argWasQuoted) {
     args.push(current);
     wasQuoted.push(argWasQuoted);
+    quotedEnds.push(quotedEnd);
   }
 
-  const split = splitOperatorTokens(args, wasQuoted);
+  const split = splitOperatorTokens(args, wasQuoted, quotedEnds);
 
   // Expand brace patterns like {a,b,c} — but not inside quoted arguments (matches bash behavior)
   return expandBraces(split.args, split.wasQuoted);
@@ -843,28 +851,49 @@ function canSplitRedirect(token: string): boolean {
  */
 function splitOperatorTokens(
   args: string[],
-  wasQuoted: boolean[]
+  wasQuoted: boolean[],
+  quotedEnds: number[]
 ): { args: string[]; wasQuoted: boolean[] } {
   const outArgs: string[] = [];
   const outQuoted: boolean[] = [];
+  const isOperator = (s: string) => s === ';' || s === '&&' || s === '||' || s === '|';
 
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
-    const splittable =
-      !wasQuoted[i] && (OPERATOR_SPLIT_RE.test(token) || canSplitRedirect(token));
-    if (!splittable) {
+    // Only the run after the last closing quote is eligible. Testing the whole token treated
+    // `echo '---'; date` as one quoted argument, so the `;` never became an operator and `date`
+    // was swallowed as an argument to echo.
+    const qEnd = quotedEnds[i] ?? 0;
+    const head = token.slice(0, qEnd);
+    const tail = token.slice(qEnd);
+    if (!OPERATOR_SPLIT_RE.test(tail) && !canSplitRedirect(tail)) {
       outArgs.push(token);
       outQuoted.push(wasQuoted[i]);
       continue;
     }
-    for (const chained of token.split(OPERATOR_SPLIT_RE)) {
+
+    const pieces: string[] = [];
+    for (const chained of tail.split(OPERATOR_SPLIT_RE)) {
       if (chained === '') continue;
-      const pieces = canSplitRedirect(chained) ? chained.split(GLUED_REDIRECT_RE) : [chained];
-      for (const piece of pieces) {
-        if (piece === '') continue;
-        outArgs.push(piece);
-        outQuoted.push(false);
+      const split = canSplitRedirect(chained) ? chained.split(GLUED_REDIRECT_RE) : [chained];
+      for (const piece of split) {
+        if (piece !== '') pieces.push(piece);
       }
+    }
+
+    // The quoted run belongs to whatever came before the first operator: its own argument when
+    // the tail opens with one (`'---';`), otherwise glued to the first piece (`'q'x;y` → `qx`).
+    if (head) {
+      if (pieces.length === 0 || isOperator(pieces[0])) {
+        outArgs.push(head);
+        outQuoted.push(true);
+      } else {
+        pieces[0] = head + pieces[0];
+      }
+    }
+    for (const piece of pieces) {
+      outArgs.push(piece);
+      outQuoted.push(head !== '' && piece.startsWith(head));
     }
   }
 

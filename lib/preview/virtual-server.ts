@@ -1,4 +1,5 @@
 import { VirtualFileSystem } from '../vfs';
+import { FALLBACK_RUNTIME } from '@/lib/vfs/project-settings';
 import { VirtualFile, ProjectRuntime } from '../vfs/types';
 import { ProcessedFile, Route, CompiledProject } from './types';
 import Handlebars from 'handlebars';
@@ -27,7 +28,10 @@ export class VirtualServer {
     this.projectId = projectId;
     this.deploymentId = opts?.deploymentId;
     this.entryPoint = opts?.entryPoint || '/index.html';
-    this.runtime = opts?.runtime || 'handlebars';
+    // FALLBACK_RUNTIME rather than a literal: the features gated on the runtime answer the absent
+    // case from the same constant, so a project with none cannot be rendered as one thing and
+    // reasoned about as another.
+    this.runtime = opts?.runtime || FALLBACK_RUNTIME;
     // Off unless a caller asks: the editor preview wants readable output, and
     // only the paths that produce something a visitor downloads turn it on.
     this.minify = opts?.minify === true;

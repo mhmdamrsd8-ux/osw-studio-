@@ -27,7 +27,10 @@ export async function wcCommand(env: ShellEnv): Promise<ShellResult> {
   if (!wcAnyFlag) { wcFlags.l = true; wcFlags.w = true; wcFlags.c = true; }
 
   const wcCount = (content: string) => ({
-    l: content === '' ? 0 : (content.match(/\r?\n/g) || []).length,
+    // Count lines, not newlines. Piped stdin arrives without a trailing newline (results are
+    // join('\n')), so counting separators alone made every `cmd | wc -l` one short. Files that do
+    // end in a newline still count the same as they would under real wc.
+    l: content === '' ? 0 : (content.match(/\r?\n/g) || []).length + (/\r?\n$/.test(content) ? 0 : 1),
     w: content.trim() === '' ? 0 : content.trim().split(/\s+/).length,
     c: content.length,
   });

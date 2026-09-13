@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { normalizeProjectSettings, resolveRuntime } from './project-settings';
 import JSZip from 'jszip';
 import { logger } from '@/lib/utils';
 import {
@@ -1477,12 +1478,31 @@ export class VirtualFileSystem {
     return project;
   }
 
+  /**
+   * Write a project.
+   *
+   * `preserveUpdatedAt` marks a write as bookkeeping rather than a content edit, and that same
+   * distinction decides who owns the sync stamps. A content edit keeps whatever
+   * `lastSyncedAt`, `serverUpdatedAt` and `syncStatus` the stored row already has, because the
+   * caller cannot know them: they describe this client's relationship with the server and are set
+   * by the sync layer alone. A caller holding a `Project` across a sync has stamps from whenever
+   * it loaded, and replaying those makes the server's row look newer than anything this client
+   * has seen — which the next push reports as a conflict with another device.
+   */
   async updateProject(project: Project, options?: { preserveUpdatedAt?: boolean }): Promise<void> {
     this.ensureInitialized();
 
-    // Only update timestamp if not preserving (for sync metadata updates)
-    if (!options?.preserveUpdatedAt) {
-      project.updatedAt = new Date();
+    if (options?.preserveUpdatedAt) {
+      await this.adapter.updateProject(project);
+      return;
+    }
+
+    project.updatedAt = new Date();
+    const stored = await this.getProject(project.id);
+    if (stored) {
+      project.lastSyncedAt = stored.lastSyncedAt;
+      project.serverUpdatedAt = stored.serverUpdatedAt;
+      project.syncStatus = stored.syncStatus;
     }
     await this.adapter.updateProject(project);
   }
@@ -1874,7 +1894,7 @@ export class VirtualFileSystem {
 
     try {
       const project = await this.getProject(projectId);
-      const runtime = project?.settings?.runtime || 'handlebars';
+      const runtime = resolveRuntime(project?.settings);
       const runtimeConfig = getRuntimeConfig(runtime);
 
       // For terminal-mode runtimes (Python, Lua), package raw source files
@@ -2030,8 +2050,11 @@ export class VirtualFileSystem {
 
     // Carry over project settings (runtime, default template, etc.) so the copy
     // isn't silently reset to the legacy 'handlebars' default.
-    if (originalProject.settings && Object.keys(originalProject.settings).length > 0) {
-      newProject.settings = { ...originalProject.settings };
+    // Normalized before the spread: spreading settings that are a JSON string copies its
+    // *characters* into keys "0", "1", "2" and carries none of the real fields over.
+    const carried = normalizeProjectSettings(originalProject.settings);
+    if (Object.keys(carried).length > 0) {
+      newProject.settings = carried;
       await this.updateProject(newProject);
     }
 
@@ -2051,8 +2074,11 @@ export class VirtualFileSystem {
 
     // Preserve project settings (runtime, default template, etc.) from the export
     // so the imported project isn't reset to the legacy 'handlebars' default.
-    if (data.project.settings && Object.keys(data.project.settings).length > 0) {
-      newProject.settings = { ...data.project.settings };
+    // Same as the copy path: an archive's settings arrive as parsed JSON, so the string case is
+    // reachable here too.
+    const imported = normalizeProjectSettings(data.project.settings);
+    if (Object.keys(imported).length > 0) {
+      newProject.settings = imported;
       await this.updateProject(newProject);
     }
 

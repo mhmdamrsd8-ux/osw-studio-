@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useMemo, useCallback, DragEvent, ClipboardEvent } from 'react';
-import { MessageSquare, Loader2, CheckCircle, XCircle, ChevronRight, FileCode, ClipboardList, Bot, RotateCcw, RefreshCw, Send, ChevronUp, ChevronDown, Code, Trash2, Brain, Image as ImageIcon, Type, Mic, Square, Plus, FileText, LogIn, Settings2 } from 'lucide-react';
+import { MessageSquare, Loader2, CheckCircle, XCircle, ChevronRight, FileCode, ClipboardList, Bot, RotateCcw, RefreshCw, Send, ChevronUp, ChevronDown, Code, Trash2, Brain, Image as ImageIcon, Type, Mic, Square, Plus, FileText, LogIn, Settings2, Camera } from 'lucide-react';
 import type { WorkspaceMode, ActiveInterview } from '@/lib/stores/slices/project';
 import { InterviewPicker } from './interview-picker';
 import { InterviewTemplatesManager } from '@/components/interview/InterviewTemplatesManager';
@@ -9,11 +9,14 @@ import { interviewTemplatesService } from '@/lib/interview/templates-service';
 import type { InterviewTemplate, InterviewHandoff } from '@/lib/interview/types';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import type { DebugEvent } from '@/lib/stores/types';
-import { EventProcessor, classifyBashCommand, type Turn, type ToolCall } from './event-processor';
+import { EventProcessor, type Turn, type ToolCall } from './event-processor';
+import { classifyCommand } from '@/lib/agent-activity/classify-command';
 import { shouldShowPacingNotice, type PacingToolItem } from '@/lib/pacing-notice';
 import { configManager } from '@/lib/config/storage';
 import { X } from 'lucide-react';
 import { MarkdownRenderer } from '@/components/markdown-renderer';
+import { cn } from '@/lib/utils';
+import { pendingImageFromDataUrl } from '@/lib/llm/pending-image';
 import { ChipsBlock } from './chips';
 import { PanelContainer, PanelHeader } from '@/components/ui/panel';
 import { Button } from '@/components/ui/button';
@@ -24,7 +27,7 @@ import { UnifiedSettingsModal, type SettingsPane } from '@/components/unified-se
 import { createPortal } from 'react-dom';
 import { ProjectModelsPanel } from '@/components/providers-models/project-models-panel';
 import { hasAnyConnectedProvider } from '@/lib/llm/providers/connection-status';
-import { SUGGESTION_PILLS, INLINE_SUGGESTION_COUNT } from '@/lib/constants/suggestion-pills';
+import { SUGGESTION_PILLS, QUICK_EDIT_PILLS, INLINE_SUGGESTION_COUNT } from '@/lib/constants/suggestion-pills';
 import { checkHFCapabilities, loginHF } from '@/lib/auth/hf-auth';
 import { detectDeploymentType } from '@/lib/telemetry/config';
 import { FocusContextPayload } from '@/lib/preview/types';
@@ -155,6 +158,26 @@ interface ChatPanelProps {
   onClearPlacedBlocks?: () => void;
   // Layout overrides
   hideHeader?: boolean;
+  /**
+   * Quick edit's rendering of the conversation, replacing the transcript.
+   *
+   * Its presence is what puts the panel in simple mode: no `PermissionModeSelector` and no interview
+   * template management, the quick-edit starters instead of the build ones, and a placeholder that
+   * asks for a change rather than a site. The model picker and the mode menu stay -- both are
+   * ordinary choices, and the mode is the agent's, not the surface. The thread itself is built by
+   * the owner, which is where the save, restore and undo it offers already live.
+   */
+  simpleThread?: React.ReactNode;
+  /**
+   * The panel is the only one open, so it has the whole window: the messages and the composer are
+   * held to a reading column in the middle rather than stretched across it.
+   */
+  solo?: boolean;
+  /**
+   * Capture the preview as it is, as a data URL, for the attach menu's Screenshot item. Absent when
+   * there is no preview to capture, which hides the item.
+   */
+  onCaptureContextScreenshot?: () => Promise<string | null>;
   className?: string;
   /** Content rendered in place of the composer (e.g. creation confirmation) */
   composerOverlay?: React.ReactNode;
@@ -214,6 +237,9 @@ export function ChatPanel({
   onRemovePlacedBlock,
   onClearPlacedBlocks,
   hideHeader,
+  simpleThread,
+  solo = false,
+  onCaptureContextScreenshot,
   className,
   composerOverlay,
   systemNote,
@@ -304,6 +330,20 @@ export function ChatPanel({
 
   // Prompt state — owned by ChatPanel, never leaves this component until submit
   const [prompt, setPrompt] = useState('');
+  /**
+   * Text the Styles tab handed over, appended rather than sent.
+   *
+   * Keyed on the nonce, not the text, so asking about the same property twice appends twice. The
+   * last applied nonce is a ref because both composers (the desktop tree and the mobile one) are
+   * mounted at once and each has to apply it to its own draft exactly once.
+   */
+  const composerDraft = useWorkspaceStore(s => s.composerDraft);
+  const appliedDraftRef = useRef(0);
+  useEffect(() => {
+    if (!composerDraft || composerDraft.nonce === appliedDraftRef.current) return;
+    appliedDraftRef.current = composerDraft.nonce;
+    setPrompt(prev => (prev.trim() ? `${prev.trim()}\n\n${composerDraft.text}` : composerDraft.text));
+  }, [composerDraft]);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   /** Project-specific suggestions replace the generic set; blank projects fall back to generic. */
@@ -312,7 +352,8 @@ export function ChatPanel({
   // the project's own. Before that it is the slice's empty default, which reads identically to "this
   // project has none" and would show the generic starters for a moment and then swap them out.
   const suggestionsLoaded = useWorkspaceStore(s => s.projectId) !== '';
-  const allSuggestions = projectSuggestions.length > 0 ? projectSuggestions : SUGGESTION_PILLS;
+  const simple = simpleThread !== undefined;
+  const allSuggestions = projectSuggestions.length > 0 ? projectSuggestions : simple ? QUICK_EDIT_PILLS : SUGGESTION_PILLS;
   // Ordered before the inline/overflow split, so a suggestion scoped to this page takes one of the
   // three inline slots ahead of the general ones.
   const suggestions = useMemo(
@@ -368,16 +409,7 @@ export function ChatPanel({
     for (const file of files) {
       const reader = new FileReader();
       reader.onload = () => {
-        const dataUrl = reader.result as string;
-        const [header, data] = dataUrl.split(',');
-        const mediaType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
-
-        setPendingImages(prev => [...prev, {
-          id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-          data,
-          mediaType,
-          preview: dataUrl
-        }]);
+        setPendingImages(prev => [...prev, pendingImageFromDataUrl(reader.result as string)]);
       };
       reader.readAsDataURL(file);
     }
@@ -413,16 +445,7 @@ export function ChatPanel({
           pastedCount++;
           const reader = new FileReader();
           reader.onload = () => {
-            const dataUrl = reader.result as string;
-            const [header, data] = dataUrl.split(',');
-            const mediaType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
-
-            setPendingImages(prev => [...prev, {
-              id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-              data,
-              mediaType,
-              preview: dataUrl
-            }]);
+            setPendingImages(prev => [...prev, pendingImageFromDataUrl(reader.result as string)]);
           };
           reader.readAsDataURL(file);
         }
@@ -491,17 +514,23 @@ export function ChatPanel({
     for (const file of files) {
       const reader = new FileReader();
       reader.onload = () => {
-        const dataUrl = reader.result as string;
-        const [header, data] = dataUrl.split(',');
-        const mediaType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
-        setPendingImages(prev => [...prev, {
-          id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
-          data, mediaType, preview: dataUrl,
-        }]);
+        setPendingImages(prev => [...prev, pendingImageFromDataUrl(reader.result as string)]);
       };
       reader.readAsDataURL(file);
     }
   }, []);
+
+  /** The preview, as it is right now, joins the next message the way a dropped image does. */
+  const addScreenshot = useCallback(async () => {
+    if (!onCaptureContextScreenshot) return;
+    const dataUrl = await onCaptureContextScreenshot();
+    if (!dataUrl) {
+      toast.error('Could not capture the preview. Wait for it to finish loading and try again.');
+      return;
+    }
+    track('image_attached', { source: 'screenshot', count: 1 });
+    setPendingImages(prev => [...prev, pendingImageFromDataUrl(dataUrl)]);
+  }, [onCaptureContextScreenshot]);
 
   const addTextFiles = useCallback((fileList: FileList | null) => {
     if (!fileList) return;
@@ -571,7 +600,7 @@ export function ChatPanel({
   const [showPacingNotice, setShowPacingNotice] = useState(false);
   const isWritePacingItem = useCallback((it: PacingToolItem): boolean => {
     const cat = (it.name === 'bash' || it.name === 'shell')
-      ? classifyBashCommand(it.command)
+      ? classifyCommand(it.command)
       : it.name;
     return cat === 'write';
   }, []);
@@ -728,7 +757,8 @@ export function ChatPanel({
           color="var(--button-assistant-active)"
           onClose={onClose}
           panelKey="chat"
-          actions={onClearChat && (
+          actions={onClearChat && (<>
+            {onClearChat && (
             <Button
               variant="ghost"
               size="sm"
@@ -740,7 +770,8 @@ export function ChatPanel({
               <Trash2 className="h-2.5 w-2.5 md:h-3 md:w-3" />
               <span className="text-xs md:hidden">Clear chat</span>
             </Button>
-          )}
+            )}
+          </>)}
         >
           {activeInterview && (
             <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/15 text-blue-500 text-[11px] font-medium px-2 py-0.5">
@@ -752,28 +783,15 @@ export function ChatPanel({
       )}
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-        {showPacingNotice && (
-          <div role="status" aria-live="polite" className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            <Loader2 aria-hidden="true" className="h-3 w-3 mt-0.5 shrink-0 animate-spin opacity-60" />
-            <span className="flex-1">
-              Large file writes can take a while. The agent is still working and will continue as soon as the write finishes.
-            </span>
-            <button
-              type="button"
-              onClick={dismissPacingNotice}
-              aria-label="Dismiss notice"
-              className="shrink-0 rounded p-0.5 hover:bg-muted-foreground/10"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </div>
-        )}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4">
+      <div className={cn('space-y-4', solo && 'mx-auto w-full max-w-3xl')}>
         {!workspaceReady && turns.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2 p-4">
             <Loader2 className="h-5 w-5 animate-spin opacity-40" />
             <span className="text-xs">Loading conversation…</span>
           </div>
+        ) : simple ? (
+          simpleThread
         ) : turns.length === 0 ? (
           <div className="text-xs text-muted-foreground text-center p-4">
             No messages yet. Start a conversation to see it here.
@@ -831,13 +849,33 @@ export function ChatPanel({
             });
           })()
         )}
+        {/* Last in the list, not first: the transcript appends downward and scrolls to the
+            newest item, so a notice at the top is either missed or has to be scrolled back
+            away from. It is about what the agent is doing right now, which is the bottom. */}
+        {showPacingNotice && (
+          <div role="status" aria-live="polite" className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 aria-hidden="true" className="h-3 w-3 mt-0.5 shrink-0 animate-spin opacity-60" />
+            <span className="flex-1">
+              Large file writes can take a while. The agent is still working and will continue as soon as the write finishes.
+            </span>
+            <button
+              type="button"
+              onClick={dismissPacingNotice}
+              aria-label="Dismiss notice"
+              className="shrink-0 rounded p-0.5 hover:bg-muted-foreground/10"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+      </div>
       </div>
 
       {/* Input — or composerOverlay when present */}
       {composerOverlay ? (
-        <div className="p-3">{composerOverlay}</div>
+        <div className={cn('p-3', solo && 'mx-auto w-full max-w-3xl')}>{composerOverlay}</div>
       ) : (
-      <div className="p-3 space-y-2">
+      <div className={cn('p-3 space-y-2', solo && 'mx-auto w-full max-w-3xl')}>
         {runtimeErrorHint}
         {/* Hidden inputs driven by the + attach menu */}
         <input
@@ -859,7 +897,7 @@ export function ChatPanel({
         {/* Quick-start suggestions live in the context area above the input. Adding context
             (focus, images, files) grows MessageContext below and bumps these up. Shown only for
             a fresh, connected, idle composer (not interview or recording). */}
-        {((providerReady || hasAnyConnectedProvider()) && turns.length === 0 && !generating && mode !== 'interview' && !isRecording && !speech.isListening && suggestionsLoaded) && (
+        {((providerReady || hasAnyConnectedProvider()) && (simple || turns.length === 0) && !generating && mode !== 'interview' && !isRecording && !speech.isListening && suggestionsLoaded) && (
           <div>
             {inlineSuggestions.length > 0 && (
               <div className="text-xs text-muted-foreground mb-1.5">Try one of these:</div>
@@ -960,9 +998,11 @@ export function ChatPanel({
               <TooltipContent side="top">{mod.label}</TooltipContent>
             </Tooltip>
           ))}
-          <div className="ml-auto flex items-center">
-            <PermissionModeSelector />
-          </div>
+          {!simple && (
+            <div className="ml-auto flex items-center">
+              <PermissionModeSelector />
+            </div>
+          )}
         </div>
         <div
           className={`bg-card border shadow-sm overflow-hidden transition-all ${
@@ -988,8 +1028,12 @@ export function ChatPanel({
               templates={interviewTemplates}
               onStart={onStartInterview}
               disabled={!providerReady}
-              onManage={() => { setInterviewManagerMode('list'); setInterviewManagerOpen(true); }}
-              onNew={() => { setInterviewManagerMode('create'); setInterviewManagerOpen(true); }}
+              {...(simple ? {} : {
+                // Editing the templates is the Interviews page, which the simple menu does not
+                // list; offering it from here would put it back.
+                onManage: () => { setInterviewManagerMode('list'); setInterviewManagerOpen(true); },
+                onNew: () => { setInterviewManagerMode('create'); setInterviewManagerOpen(true); },
+              })}
             />
           ) : (isRecording || speech.isListening) ? (
             <div className="flex items-center gap-3 px-3 py-3">
@@ -1025,7 +1069,7 @@ export function ChatPanel({
                   }
                 }}
                 onPaste={handlePaste}
-                placeholder={!providerReady ? "Select a provider to start..." : supportsVision ? "Describe what you want to build... (paste or drop images)" : "Describe what you want to build..."}
+                placeholder={!providerReady ? "Select a provider to start..." : simple ? "Ask for a change" : supportsVision ? "Describe what you want to build... (paste or drop images)" : "Describe what you want to build..."}
                 className="flex-1 px-3 py-2 bg-transparent border-0 resize-none focus:outline-none text-sm placeholder:text-muted-foreground text-foreground"
                 rows={3}
                 disabled={generating || isTourLockingInput || !providerReady}
@@ -1072,6 +1116,13 @@ export function ChatPanel({
                           Image
                           {!supportsVision && <span className="ml-auto text-xs text-muted-foreground">unsupported</span>}
                         </DropdownMenuItem>
+                        {onCaptureContextScreenshot && (
+                          <DropdownMenuItem disabled={!supportsVision} onSelect={() => { void addScreenshot(); }}>
+                            <Camera className="h-4 w-4" />
+                            Screenshot of the preview
+                            {!supportsVision && <span className="ml-auto text-xs text-muted-foreground">unsupported</span>}
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem onSelect={() => setTimeout(() => fileInputRef.current?.click(), 0)}>
                           <FileText className="h-4 w-4" />
                           Text file
@@ -1096,7 +1147,7 @@ export function ChatPanel({
             </div>
           )}
 
-          {/* Footer */}
+          {/* Footer: the model picker and the Code/Chat/Interview menu. */}
           <div className="border-t border-border bg-muted/50 px-2 py-2">
             <div className="flex items-center justify-between gap-2">
               {/* Blurred backdrop behind the per-project model popover (Radix Popover
@@ -1222,6 +1273,8 @@ export function ChatPanel({
                 onChanged={loadInterviewTemplates}
               />
 
+              {/* Offered in the simple view too: the mode is the agent's, and quick edit is a
+                  separate field now, so picking one no longer takes the surface away. */}
               {!hideHeader && (() => {
                 const active = MODE_CONFIG[mode];
                 const ActiveIcon = active.Icon;
@@ -1641,11 +1694,15 @@ function TurnDisplay({ turn, collatedUsage, collatedTaskStartTime, onRestore, on
           {/* Checkpoint actions */}
           {turn.checkpointId && (
             <div className="flex items-center gap-1">
+              {/* Both roll the project back, so neither is offered while a run is writing to it.
+                  The handlers refuse it too — the checkpoint panel reaches the same one — and this
+                  is so the button does not look available. */}
               {onRestore && (
                 <Button
                   size="sm"
                   variant="ghost"
                   onClick={() => onRestore(turn.checkpointId!)}
+                  disabled={!!generating}
                   className="h-6 px-2 text-xs"
                   title="Restore to this checkpoint"
                 >
@@ -1658,6 +1715,7 @@ function TurnDisplay({ turn, collatedUsage, collatedTaskStartTime, onRestore, on
                   size="sm"
                   variant="ghost"
                   onClick={() => onRetry(turn.checkpointId!)}
+                  disabled={!!generating}
                   className="h-6 px-2 text-xs"
                   title="Restore files and retry from this checkpoint"
                 >
@@ -1680,7 +1738,7 @@ interface ToolDisplayProps {
 }
 
 function ToolDisplay({ tool, isExpanded, onToggle }: ToolDisplayProps) {
-  const category = (tool.name === 'bash' || tool.name === 'shell') ? classifyBashCommand(tool.parameters?.command ?? tool.parameters?.cmd) : tool.name;
+  const category = (tool.name === 'bash' || tool.name === 'shell') ? classifyCommand(tool.parameters?.command ?? tool.parameters?.cmd) : tool.name;
   return (
     <div
       className={`bg-muted/30 rounded-md transition-all ${

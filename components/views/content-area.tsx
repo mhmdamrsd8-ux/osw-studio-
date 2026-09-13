@@ -65,7 +65,7 @@ export function ContentArea({
     case 'deployments':
       return <DeploymentsView onProjectSelect={onProjectSelect} workspaceId={workspaceId} />;
     case 'users':
-      return <UsersView />;
+      return <UsersView workspaceId={workspaceId} />;
     case 'workspaces':
       return <WorkspacesView />;
     case 'templates':

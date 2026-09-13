@@ -102,6 +102,17 @@ export type PreviewMessage =
    */
   | { type: 'tree-level'; parentId: string | null; nodes: TreeNode[]; truncated: number }
   /**
+   * The answer to `tree-path`: the levels from the body down to the requested node's parent, in
+   * that order, plus the ancestor ids to expand. `path` ends with the requested node itself.
+   *
+   * Empty `levels` means the id did not resolve; the panel leaves its tree alone.
+   */
+  | {
+      type: 'tree-levels';
+      levels: Array<{ parentId: string | null; nodes: TreeNode[]; truncated: number }>;
+      path: string[];
+    }
+  /**
    * The id the host asked to select no longer resolves to an element in the frame — the document was
    * replaced by a recompile, or the element was edited away. Nothing was selected; the panel's rows
    * for that document are dead and it should collapse to root rather than keep offering them.
@@ -172,6 +183,15 @@ export type PreviewHostMessage =
   | { type: 'placement-remove'; placementId: string }
   /** Serialize one level of the tree and post it back. `nodeId` null means the body level. */
   | { type: 'tree-request'; nodeId: string | null }
+  /**
+   * Serialize every level from the body down to this node's parent, so the tree can reveal an
+   * element that was picked in the preview rather than clicked in the tree.
+   *
+   * One message rather than the host walking up level by level: it does not know the ancestors
+   * (`TreeNode` carries no path), and a level whose parent has not arrived yet is dropped by the
+   * reducer as an orphan, so the levels have to come back in order and together.
+   */
+  | { type: 'tree-path'; nodeId: string }
   /** Show the shared highlight overlay on this node; `nodeId` null hides it. */
   | { type: 'tree-highlight'; nodeId: string | null }
   /**

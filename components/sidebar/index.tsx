@@ -42,6 +42,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import pkg from '@/package.json';
 import { WorkspaceSwitcher } from '@/components/workspace-switcher';
 import { getExternalAccountUrl } from '@/lib/config/deployment-mode';
+import { useStudioView } from '@/components/view-mode-provider';
 
 // Collapsed sidebar width
 export const COLLAPSED_SIDEBAR_WIDTH = 56; // Width in pixels for icon-only buttons
@@ -55,11 +56,19 @@ interface SidebarItem {
   href?: string;
   serverModeOnly?: boolean;
   adminOnly?: boolean;
+  /** Shown to a workspace owner, who administers their own members. */
+  ownerOnly?: boolean;
+  /** Hidden in the simple view, which is projects and deployments and nothing else. */
+  studioOnly?: boolean;
   hasRecentProjects?: boolean;
   subItems?: {
     id: string;
     label: string;
     icon: React.ElementType;
+    /** Hidden in the simple view, like the top-level flag of the same name. */
+    studioOnly?: boolean;
+    /** Shown to a workspace owner, like the top-level flag of the same name. */
+    ownerOnly?: boolean;
     file?: string; // For docs
     /** Hidden in browser mode, like the top-level flag of the same name. */
     serverModeOnly?: boolean;
@@ -70,10 +79,9 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, path: 'dashboard' },
   { id: 'projects', label: 'Projects', icon: FolderOpen, path: 'projects', hasRecentProjects: true },
   { id: 'deployments', label: 'Deployments', icon: Globe, path: 'deployments', serverModeOnly: true },
-  { id: 'templates', label: 'Templates', icon: LayoutTemplate, path: 'templates' },
-  { id: 'skills', label: 'Skills', icon: Sparkles, path: 'skills' },
-  { id: 'interviews', label: 'Interviews', icon: ClipboardList, path: 'interviews' },
-  { id: 'users', label: 'Users', icon: Users, path: 'users', serverModeOnly: true, adminOnly: true },
+  { id: 'templates', label: 'Templates', icon: LayoutTemplate, path: 'templates', studioOnly: true },
+  { id: 'skills', label: 'Skills', icon: Sparkles, path: 'skills', studioOnly: true },
+  { id: 'interviews', label: 'Interviews', icon: ClipboardList, path: 'interviews', studioOnly: true },
   {
     id: 'docs',
     label: 'Docs',
@@ -94,16 +102,17 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
     subItems: [
       { id: 'connections', label: 'Connections', icon: FileText },
       { id: 'models', label: 'Models', icon: LayoutGrid },
-      { id: 'templates', label: 'Templates', icon: Layers },
+      { id: 'templates', label: 'Templates', icon: Layers, studioOnly: true },
       { id: 'appearance', label: 'Appearance', icon: Palette },
       { id: 'costs', label: 'Cost Tracking', icon: DollarSign },
-      { id: 'permissions', label: 'Permissions', icon: Shield },
+      { id: 'permissions', label: 'Permissions', icon: Shield, studioOnly: true },
       { id: 'data', label: 'Data', icon: Database },
-      { id: 'mail', label: 'Mail', icon: Mail, serverModeOnly: true },
+      { id: 'mail', label: 'Mail', icon: Mail, serverModeOnly: true, studioOnly: true },
+      { id: 'users', label: 'Users', icon: Users, serverModeOnly: true, ownerOnly: true },
     ]
   },
-  { id: 'tour', label: 'Guided Tour', icon: Info, action: 'start-tour' },
-  { id: 'tester', label: 'Benchmark', icon: TestTube, path: '/test-generation' },
+  { id: 'tour', label: 'Guided Tour', icon: Info, action: 'start-tour', studioOnly: true },
+  { id: 'tester', label: 'Benchmark', icon: TestTube, path: '/test-generation', studioOnly: true },
   { id: 'about', label: 'About', icon: Info, action: 'open-about' },
   { id: 'discord', label: 'Discord', icon: DiscordIcon, href: 'https://discord.gg/mAJ8Ss4u' },
   { id: 'github', label: 'GitHub', icon: Github, href: 'https://github.com/o-stahl/osw-studio' },
@@ -127,6 +136,8 @@ function SidebarFlyout({
   sidebarRight,
   recentProjects,
   loadingRecentProjects,
+  studioView,
+  isOwner,
   onSubItemClick,
   onMouseEnter,
   onMouseLeave,
@@ -136,6 +147,9 @@ function SidebarFlyout({
   sidebarRight: number;
   recentProjects: Project[];
   loadingRecentProjects: boolean;
+  /** The collapsed sidebar's flyout has to hide the same sub-items the expanded one does. */
+  studioView: boolean;
+  isOwner: boolean | null;
   onSubItemClick: (parentItem: SidebarItem, subItem: { id: string; label: string; icon: React.ElementType; file?: string }) => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
@@ -187,7 +201,11 @@ function SidebarFlyout({
           <div className="px-3 py-1.5 text-xs text-muted-foreground">No recent projects</div>
         )
       ) : item.subItems ? (
-        item.subItems.filter(si => !si.serverModeOnly || process.env.NEXT_PUBLIC_SERVER_MODE === 'true').map(subItem => {
+        item.subItems
+          .filter(si => !si.serverModeOnly || process.env.NEXT_PUBLIC_SERVER_MODE === 'true')
+          .filter(si => !si.studioOnly || studioView)
+          .filter(si => !si.ownerOnly || isOwner !== false)
+          .map(subItem => {
           const SubIcon = subItem.icon;
           return (
             <button
@@ -264,13 +282,27 @@ function SidebarContent({
   const { pendingCount } = useProjectSyncState();
   const isDesktop = process.env.NEXT_PUBLIC_DESKTOP === 'true';
   const [isAdmin, setIsAdmin] = useState<boolean | null>(isServerMode ? null : false);
+  // Null until /api/auth/me answers. Both are read as "not yet known" rather than false, so a
+  // reload does not blink the full menu at someone in the simple view, or hide Users from an owner.
+  const [isWorkspaceOwner, setIsWorkspaceOwner] = useState<boolean | null>(isServerMode ? null : false);
+  // Server-seeded, so the first HTML already carries the right menu and there is nothing to correct
+  // after hydration.
+  const studioView = useStudioView();
 
   useEffect(() => {
     if (!isServerMode) return;
+
+    // Admin and owner status only, which a view change does not affect. The view itself comes from
+    // the server-seeded context, which refreshes itself.
     fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(data => {
       setIsAdmin(data?.user?.isAdmin ?? false);
-    }).catch(() => setIsAdmin(false));
-  }, [isServerMode]);
+      const roles = data?.user?.workspaceRoles as Record<string, string> | undefined;
+      setIsWorkspaceOwner(workspaceId ? roles?.[workspaceId] === 'owner' : false);
+    }).catch(() => {
+      setIsAdmin(false);
+      setIsWorkspaceOwner(false);
+    });
+  }, [isServerMode, workspaceId]);
 
   // Track if we're on mobile (client-side only)
   const [isMobile, setIsMobile] = useState(false);
@@ -364,7 +396,12 @@ function SidebarContent({
 
   // Filter sidebar items based on Server Mode
   const visibleSidebarItems = SIDEBAR_ITEMS.filter(
-    item => (!item.serverModeOnly || isServerMode) && (!item.adminOnly || isAdmin !== false)
+    item =>
+      (!item.serverModeOnly || isServerMode) &&
+      (!item.adminOnly || isAdmin !== false) &&
+      // An instance admin administers every workspace, so they see Users wherever they are.
+      (!item.ownerOnly || isWorkspaceOwner !== false || isAdmin === true) &&
+      (!item.studioOnly || studioView)
   );
 
   const toggleExpanded = (itemId: string) => {
@@ -471,8 +508,9 @@ function SidebarContent({
       if (item.path.startsWith('/')) {
         router.push(item.path);
       } else if (isServerMode) {
-        // System-wide items (users, workspaces) always go to /admin/
-        const systemItems = ['users', 'workspaces'];
+        // Workspaces stays instance-wide; users is workspace-scoped, with the instance tier
+        // rendered inside the same page for an admin.
+        const systemItems = ['workspaces'];
         if (systemItems.includes(item.id)) {
           router.push(`/admin/${item.path}`);
         } else if (workspaceId) {
@@ -745,7 +783,11 @@ function SidebarContent({
                   "mt-1 space-y-1",
                   collapsed ? "flex flex-col items-center" : "ml-4"
                 )}>
-                  {item.subItems.filter(si => !si.serverModeOnly || isServerMode).map((subItem) => {
+                  {item.subItems
+                    .filter(si => !si.serverModeOnly || isServerMode)
+                    .filter(si => !si.studioOnly || studioView)
+                    .filter(si => !si.ownerOnly || isWorkspaceOwner !== false || isAdmin === true)
+                    .map((subItem) => {
                     const SubIcon = subItem.icon;
                     // For docs, check currentDocId. For settings, check URL param or path
                     const wsBase = workspaceId ? `/w/${workspaceId}` : '/admin';
@@ -908,6 +950,8 @@ function SidebarContent({
           sidebarRight={sidebarRef.current?.getBoundingClientRect().right ?? 0}
           recentProjects={recentProjects}
           loadingRecentProjects={loadingRecentProjects}
+          studioView={studioView}
+          isOwner={isWorkspaceOwner !== false || isAdmin === true}
           onSubItemClick={handleSubItemClick}
           onMouseEnter={cancelFlyoutHide}
           onMouseLeave={hideFlyout}
@@ -918,6 +962,17 @@ function SidebarContent({
 }
 
 // Wrapper component with Suspense boundary for Next.js 15
+/**
+ * The top-level views the simple view does not offer.
+ *
+ * Derived from the same table the menu is built from, so a view whose `studioOnly` changes cannot be
+ * hidden from the menu while something else still lands on it. An absolute `path` is a link out of
+ * the app rather than a view it can land on, so those are left out.
+ */
+export const STUDIO_ONLY_VIEWS: readonly string[] = SIDEBAR_ITEMS
+  .filter((item) => item.studioOnly && item.path && !item.path.startsWith('/'))
+  .map((item) => item.path as string);
+
 export function Sidebar(props: SidebarProps) {
   return (
     <Suspense fallback={<div className="w-full h-full bg-card" />}>

@@ -2,11 +2,10 @@
 
 import React, { Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { UnifiedSettings, type SettingsPane } from '@/components/unified-settings';
+import { UnifiedSettings, SETTINGS_PANE_IDS, type SettingsPane } from '@/components/unified-settings';
 
-const VALID_PANES = new Set<SettingsPane>([
-  'connections', 'models', 'templates', 'appearance', 'costs', 'permissions', 'data', 'mail',
-]);
+// Derived from the pane definitions, so a new pane is deep-linkable the moment it is declared.
+const VALID_PANES = new Set<SettingsPane>(SETTINGS_PANE_IDS);
 
 // Backward compat: map old param values to new pane IDs
 const LEGACY_MAP: Record<string, SettingsPane> = {

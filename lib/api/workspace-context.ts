@@ -40,3 +40,19 @@ export async function getWorkspaceContext(
   await adapter.init();
   return { session, workspaceId, adapter };
 }
+
+/**
+ * Owner-only guard for a workspace route that has no adapter to open.
+ *
+ * Separate from `getWorkspaceContext` because the settings surfaces this guards, mail and members,
+ * read the system database rather than the workspace's own, so opening the workspace adapter would
+ * be work that is never used.
+ */
+export async function requireWorkspaceOwner(
+  params: Promise<{ workspaceId: string }>
+): Promise<{ session: SessionData; workspaceId: string }> {
+  const session = await requireAuth();
+  const { workspaceId } = await params;
+  verifyWorkspaceAccess(session.userId, workspaceId, 'owner');
+  return { session, workspaceId };
+}

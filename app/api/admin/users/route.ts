@@ -96,6 +96,7 @@ export async function GET(request: NextRequest) {
         displayName: user.display_name,
         isAdmin: user.is_admin === 1,
         active: user.active === 1,
+        studioView: user.studio_view === 1,
         workspaces: listUserWorkspaces(user.id),
         projectCount: stats.projectCount,
         storageMb: getUserStorageMb(user.id),

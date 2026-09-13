@@ -13,7 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { MoreVertical, Trash2, Download, FileArchive, Copy, Settings, FileBox, Pencil, Eye } from 'lucide-react';
+import { MoreVertical, Trash2, Download, FileArchive, Copy, Settings, FileBox, Pencil, Eye, Wand2 } from 'lucide-react';
 import { ThumbnailArea } from '@/components/ui/thumbnail-area';
 import { captureProjectScreenshot } from '@/lib/utils/project-thumbnail';
 import { logger, formatCompactAge } from '@/lib/utils';
@@ -28,6 +28,8 @@ interface ProjectTableRowProps {
   onPreview: (project: Project) => void;
   onExportAsTemplate?: (project: Project) => void;
   onBackend?: (project: Project) => void;
+  /** Absent outside server mode, where quick edit has no route to open. */
+  onQuickEdit?: (project: Project) => void;
   onUpdate: (project: Project) => void;
   /** True when the row hid its inline actions, so the menu offers them instead. */
   compactRows?: boolean;
@@ -49,6 +51,7 @@ export const ProjectTableRow = React.memo(function ProjectTableRow({
   onPreview,
   onExportAsTemplate,
   onBackend,
+  onQuickEdit,
   onUpdate,
   compactRows,
 }: ProjectTableRowProps) {
@@ -117,6 +120,14 @@ export const ProjectTableRow = React.memo(function ProjectTableRow({
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => onPreview(project)}>
                     <Eye className="w-4 h-4 mr-2" />Preview
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+              {onQuickEdit && (
+                <>
+                  <DropdownMenuItem onClick={() => onQuickEdit(project)}>
+                    <Wand2 className="w-4 h-4 mr-2" />Quick edit
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                 </>

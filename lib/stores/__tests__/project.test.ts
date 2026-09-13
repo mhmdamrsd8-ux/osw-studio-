@@ -214,3 +214,126 @@ describe('project slice', () => {
     expect(store.getState().projectId).toBe('p');
   });
 });
+
+describe('the composer draft', () => {
+  let store: ReturnType<typeof createTestStore>;
+
+  beforeEach(() => {
+    store = createTestStore();
+  });
+
+  it('starts with nothing waiting for the composer', () => {
+    expect(store.getState().composerDraft).toBeNull();
+  });
+
+  it('carries the text the Styles tab handed over', () => {
+    store.getState().appendComposerDraft('Make padding-block: 24px stick.');
+
+    expect(store.getState().composerDraft?.text).toBe('Make padding-block: 24px stick.');
+  });
+
+  it('raises the nonce on every hand-over, so asking twice appends twice', () => {
+    // The composer applies a draft once per nonce. Asking about the same property twice sends
+    // identical text, so without a fresh nonce the second press would read as nothing happening.
+    store.getState().appendComposerDraft('same text');
+    const first = store.getState().composerDraft!.nonce;
+
+    store.getState().appendComposerDraft('same text');
+    const second = store.getState().composerDraft!.nonce;
+
+    expect(second).toBeGreaterThan(first);
+  });
+
+  it('counts from whatever the previous draft reached, rather than restarting', () => {
+    store.getState().appendComposerDraft('one');
+    store.getState().appendComposerDraft('two');
+    store.getState().appendComposerDraft('three');
+
+    expect(store.getState().composerDraft).toEqual({ text: 'three', nonce: 3 });
+  });
+
+  it('never sends anything by itself', () => {
+    store.getState().appendComposerDraft('a change');
+
+    // A draft is the composer's to finish: handing one over must not start a run.
+    expect(store.getState().generating).toBe(false);
+    expect(store.getState().generationTasks.size).toBe(0);
+  });
+});
+
+/**
+ * The surface and the agent's mode are two fields, and this is why.
+ *
+ * Quick edit was briefly a fourth `WorkspaceMode`, which made one variable carry both. That is what
+ * `chatMode` and the system prompt are chosen from, so a surface change decided the agent's
+ * permissions, and `setMode`'s side effects -- persisting the choice, dropping the cached
+ * orchestrator -- fired for something that is not a choice the person made. Worse in the other
+ * direction: the mode picker writes the same field, so offering it anywhere quick edit was showing
+ * replaced the surface with the full studio and nothing put it back.
+ *
+ * Each assertion here fails if `setQuickEdit` is routed back through `setMode`. The saved mode in
+ * `localStorage` is covered by the same assertion as the live one: this file runs without a window,
+ * where `setMode` skips the write, so `mode` staying put is what there is to check.
+ */
+describe('showing quick edit', () => {
+  let store: ReturnType<typeof createTestStore>;
+
+  beforeEach(() => {
+    store = createTestStore();
+    vi.mocked(track).mockClear();
+  });
+
+  it('starts on the studio', () => {
+    expect(store.getState().quickEdit).toBe(false);
+  });
+
+  it('leaves the agent in the mode the person picked', () => {
+    store.getState().setMode('chat');
+
+    store.getState().setQuickEdit(true);
+
+    expect(store.getState().quickEdit).toBe(true);
+    expect(store.getState().mode).toBe('chat');
+  });
+
+  it('is not a mode switch, so it does not report one', () => {
+    store.getState().setQuickEdit(true);
+
+    expect(vi.mocked(track).mock.calls.filter(([event]) => event === 'mode_switch')).toEqual([]);
+  });
+
+  it('does not drop the orchestrator the next run would reuse', () => {
+    store.getState().initProject({ id: 'p', name: 'P' });
+    const instance = { id: 'kept' } as never;
+    const tasks = new Map(store.getState().generationTasks);
+    tasks.set('p', {
+      projectId: 'p',
+      projectName: 'P',
+      prompt: 'test',
+      model: 'gpt-4',
+      startedAt: Date.now(),
+      result: 'completed',
+      paused: false,
+      pausedMessage: null,
+      orchestratorInstance: instance,
+      persistedInstance: instance,
+    });
+    store.setState({ generationTasks: tasks });
+
+    store.getState().setQuickEdit(true);
+
+    expect(store.getState().generationTasks.get('p')?.orchestratorInstance).toBe(instance);
+  });
+
+  it('gives the studio back without having moved the mode either way', () => {
+    // Asserted against a non-default mode: leaving used to restore `code`, which reads as correct
+    // right up until the person had picked something else.
+    store.getState().setMode('interview');
+
+    store.getState().setQuickEdit(true);
+    store.getState().setQuickEdit(false);
+
+    expect(store.getState().quickEdit).toBe(false);
+    expect(store.getState().mode).toBe('interview');
+  });
+});

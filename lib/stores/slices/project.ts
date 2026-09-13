@@ -5,6 +5,13 @@ import { track } from '@/lib/telemetry';
 
 type FocusTarget = FocusContextPayload & { timestamp: number };
 
+/**
+ * What the agent is being asked to be: read-only, editing, or running an interview.
+ *
+ * This is the agent's mode, not the surface on screen -- it decides `chatMode` on a run and which
+ * system prompt is built. Which surface is showing is `quickEdit`, a separate field, so that
+ * offering the mode picker somewhere does not also decide what that somewhere looks like.
+ */
 export type WorkspaceMode = 'code' | 'chat' | 'interview';
 
 export interface ActiveInterview {
@@ -29,7 +36,29 @@ export interface ProjectSlice {
    * which would drop a flag carried inside the payload.
    */
   focusIncluded: boolean;
+  /**
+   * Text handed to the chat composer without sending it.
+   *
+   * The Styles tab's "Ask the agent" writes here rather than starting a run: it knows what went
+   * wrong, not what the person wants done about it, so the message is theirs to finish. In the
+   * store because the panel that produces it and the composer that shows it are in different
+   * subtrees, and there are two composers mounted (the desktop tree and the mobile one).
+   *
+   * `nonce` is what the composer keys off, so asking twice about the same property appends twice
+   * instead of looking like nothing happened.
+   */
+  composerDraft: { text: string; nonce: number } | null;
   mode: WorkspaceMode;
+  /**
+   * Whether the workspace is showing quick edit rather than the studio.
+   *
+   * The surface, kept apart from `mode`: quick edit is the studio's panels and transcript replaced
+   * by a preview and a thread of runs, over the same project, save and checkpoint wiring, with the
+   * agent editing exactly as it does in `code`. Owned by whatever put it on screen -- the
+   * `/quick/{projectId}` route in server mode, the selection in the simple view -- and restored by
+   * that same effect on the way out.
+   */
+  quickEdit: boolean;
   activeInterview: ActiveInterview | null;
   backendEnabled: boolean;
   selectedDeploymentId: string | null;
@@ -47,11 +76,14 @@ export interface ProjectSlice {
   incrementCheckpointRefresh: () => void;
   updateProjectSettings: (settings: { runtime?: ProjectRuntime; previewEntryPoint?: string; promptSuggestions?: PromptSuggestion[] }) => void;
   setMode: (mode: WorkspaceMode) => void;
+  setQuickEdit: (on: boolean) => void;
   setActiveInterview: (interview: ActiveInterview | null) => void;
   setBackendEnabled: (enabled: boolean) => void;
   setDeployment: (id: string | null) => void;
   setFocusContext: (ctx: FocusTarget | null) => void;
   setFocusIncluded: (included: boolean) => void;
+  /** Add a paragraph to the composer's draft. Never sends. */
+  appendComposerDraft: (text: string) => void;
   setRuntimeErrors: (errors: string[]) => void;
   resetProject: () => void;
 }
@@ -70,7 +102,9 @@ export const createProjectSlice: StateCreator<CombinedState, [], [], ProjectSlic
   modelConfigVersion: 0,
   focusContext: null,
   focusIncluded: false,
+  composerDraft: null,
   mode: 'code',
+  quickEdit: false,
   activeInterview: null,
   backendEnabled: false,
   selectedDeploymentId: null,
@@ -123,6 +157,16 @@ export const createProjectSlice: StateCreator<CombinedState, [], [], ProjectSlic
     }
   },
 
+  /**
+   * Swap the surface. Deliberately touches nothing else.
+   *
+   * Not `setMode`'s business: that persists the mode picker's choice and drops the cached
+   * orchestrator so the next run is built with the new prompt. Showing a different surface over the
+   * same project is neither of those, and routing it through `setMode` overwrote the person's saved
+   * mode with a surface name.
+   */
+  setQuickEdit: (on: boolean) => set({ quickEdit: on }),
+
   setActiveInterview: (interview: ActiveInterview | null) => {
     set({ activeInterview: interview });
     const pid = get().projectId;
@@ -147,6 +191,9 @@ export const createProjectSlice: StateCreator<CombinedState, [], [], ProjectSlic
   setDeployment: (id: string | null) => set({ selectedDeploymentId: id }),
   setFocusContext: (ctx) => set({ focusContext: ctx }),
   setFocusIncluded: (included) => set({ focusIncluded: included }),
+  appendComposerDraft: (text) => set(state => ({
+    composerDraft: { text, nonce: (state.composerDraft?.nonce ?? 0) + 1 },
+  })),
   setRuntimeErrors: (errors) => set({ runtimeErrors: errors }),
 
   resetProject: () => {
@@ -162,6 +209,7 @@ export const createProjectSlice: StateCreator<CombinedState, [], [], ProjectSlic
       promptSuggestions: [],
       focusContext: null,
       focusIncluded: false,
+      composerDraft: null,
       activeInterview: null,
       backendEnabled: false,
       selectedDeploymentId: null,

@@ -30,8 +30,6 @@ import {
   Home,
   Eye,
   Crosshair,
-  Camera,
-  Loader2,
   Maximize,
   Minimize,
   LayoutGrid,
@@ -44,12 +42,17 @@ import type { ProjectRuntime } from '@/lib/vfs/types';
 import type { PlacementResult, PlacementBlockInfo } from '@/lib/preview/types';
 import { pushRuntimeError, clearRuntimeErrors } from '@/lib/preview/runtime-errors';
 import { supportsDirectEditing } from '@/lib/runtimes/registry';
+import { FALLBACK_RUNTIME } from '@/lib/vfs/project-settings';
 import { PalettePanel } from '@/components/semantic-blocks/palette-panel';
 import type { SemanticBlock } from '@/lib/semantic-blocks/types';
 import { useWorkspaceStore } from '@/lib/stores/workspace';
 
 export interface MultipagePreviewHandle {
-  captureScreenshot: (waitForContent?: boolean) => Promise<string | null>;
+  /**
+   * A JPEG data URL of the frame, full page, scaled to `outputWidth` (the thumbnail size when
+   * omitted). Null when the frame is not ready or the capture fails.
+   */
+  captureScreenshot: (waitForContent?: boolean, options?: { outputWidth?: number }) => Promise<string | null>;
   startBlockDrag: (block: PlacementBlockInfo) => void;
   getActivePath: () => string;
   removePlaceholder: (placementId: string) => void;
@@ -90,11 +93,12 @@ interface MultipagePreviewProps {
   hasFocusTarget?: boolean;
   onClose?: () => void;
   deploymentId?: string | null;
-  onCaptureScreenshot?: (screenshot: string) => void;
   entryPoint?: string;
   runtime?: ProjectRuntime;
   onFullscreen?: () => void;
   isFullscreen?: boolean;
+  /** Quick edit: the toolbar without the studio's semantic-blocks control. */
+  simple?: boolean;
   placementActive?: boolean;
   onPlacementToggle?: () => void;
   onPlacementComplete?: (payload: PlacementResult) => void;
@@ -122,6 +126,8 @@ interface MultipagePreviewProps {
    * child of this component, so it cannot receive the frame's messages itself.
    */
   onTreeLevel?: (message: Extract<PreviewMessage, { type: 'tree-level' }>) => void;
+  /** The answer to `tree-path`: the levels needed to reveal one node. Lifted like `onTreeLevel`. */
+  onTreeLevels?: (message: Extract<PreviewMessage, { type: 'tree-levels' }>) => void;
   /**
    * An id the consumer sent could not be resolved in the frame.
    *
@@ -1022,6 +1028,42 @@ export function generateNavigationScript(normalizedPath: string, directEdit: boo
               return;
             }
 
+            if (data.type === 'tree-path') {
+              // Every level from the body down to the node's parent, in one reply. The host cannot
+              // walk this itself: a TreeNode carries no path, and the reducer drops a level whose
+              // parent it has not seen, so the levels have to arrive in order and together.
+              const target = __oswResolveNode(data.nodeId);
+              if (!target) {
+                if (isInIframe) {
+                  window.parent.postMessage({ type: 'tree-levels', levels: [], path: [] }, '*');
+                }
+                return;
+              }
+              // Only elements carrying provenance are rows, so the chain skips everything else.
+              // A target without provenance of its own (built by JS at runtime) therefore reveals
+              // its nearest ancestor that does have a row, rather than nothing. The attribute name
+              // appears here only as a string literal, which provenance-wiring.test.ts enforces.
+              const chain = [];
+              let walk = target;
+              while (walk && walk !== document.body) {
+                if (walk.getAttribute('data-osw-src') !== null) chain.unshift(walk);
+                walk = walk.parentElement;
+              }
+              const bodyLevel = __oswSerializeLevel(document.body);
+              const levels = [{ parentId: null, nodes: bodyLevel.nodes, truncated: bodyLevel.truncated }];
+              // The node itself is not expanded, so its own level is not serialized.
+              for (let i = 0; i < chain.length - 1; i++) {
+                const lvl = __oswSerializeLevel(chain[i]);
+                levels.push({ parentId: __oswNodeId(chain[i]), nodes: lvl.nodes, truncated: lvl.truncated });
+              }
+              const path = [];
+              for (let j = 0; j < chain.length; j++) path.push(__oswNodeId(chain[j]));
+              if (isInIframe) {
+                window.parent.postMessage({ type: 'tree-levels', levels: levels, path: path }, '*');
+              }
+              return;
+            }
+
             if (data.type === 'tree-highlight') {
               // The click selector's overlay, through its one visibility control — not a second
               // highlight mechanism, so a hover from the tree and a hover in the preview cannot
@@ -1220,17 +1262,18 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
   hasFocusTarget = false,
   onClose,
   deploymentId,
-  onCaptureScreenshot,
   entryPoint,
   runtime,
   onFullscreen,
   isFullscreen = false,
+  simple = false,
   placementActive,
   onPlacementToggle,
   onPlacementComplete,
   standalone = false,
   provenance = false,
   onTreeLevel,
+  onTreeLevels,
   onTreeStale,
   onStyleComputed,
   onStyleProbeResult,
@@ -1264,30 +1307,23 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
   // submit, window.location, meta refresh, etc.). Drives the recovery overlay.
   const [escaped, setEscaped] = useState(false);
   /** The element picker, read out of the layout slice rather than held here. */
+  /**
+   * The runtime this preview actually renders with.
+   *
+   * `runtime` is absent for a project whose settings never named one, and every consumer has to
+   * agree about what that means -- the compiler, and the features gated on it. Resolved once here
+   * so it cannot be answered twice. See lib/vfs/project-settings.ts.
+   */
+  const resolvedRuntime = runtime ?? FALLBACK_RUNTIME;
+
   const selectorActive = useWorkspaceStore(s => s.focusToolArmed);
   const [draggingBlock, setDraggingBlock] = useState<PlacementBlockInfo | null>(null);
   const [paletteVisible, setPaletteVisible] = useState(true);
   const [localPaletteOpen, setLocalPaletteOpen] = useState(false);
   const paletteStateRef = useRef({ localPaletteOpen: false, paletteVisible: true, draggingBlock: null as PlacementBlockInfo | null });
-  const [isCapturing, setIsCapturing] = useState(false);
   useEffect(() => {
     paletteStateRef.current = { localPaletteOpen, paletteVisible, draggingBlock };
   }, [localPaletteOpen, paletteVisible, draggingBlock]);
-
-  const handleCaptureClick = useCallback(async () => {
-    if (!iframeRef.current || !iframeReady || !onCaptureScreenshot) return;
-    setIsCapturing(true);
-    try {
-      const screenshot = await captureIframeScreenshot(
-        iframeRef.current,
-        undefined, undefined, undefined, undefined, undefined, undefined,
-        false, 1500
-      );
-      if (screenshot) onCaptureScreenshot(screenshot);
-    } finally {
-      setIsCapturing(false);
-    }
-  }, [iframeReady, onCaptureScreenshot]);
 
   const crosshairButtonStyle = useMemo(() => {
     if (selectorActive) {
@@ -1429,14 +1465,14 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
 
   // Expose captureScreenshot method via ref
   useImperativeHandle(ref, () => ({
-    captureScreenshot: async (waitForContent?: boolean) => {
+    captureScreenshot: async (waitForContent?: boolean, options?: { outputWidth?: number }) => {
       if (!iframeRef.current || !iframeReady) {
         logger.warn('Cannot capture screenshot: iframe not ready');
         return null;
       }
       return await captureIframeScreenshot(
         iframeRef.current,
-        undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, options?.outputWidth, undefined, undefined, undefined,
         waitForContent ?? false,
         1500
       );
@@ -1618,7 +1654,7 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
         serverRef.current.cleanupBlobUrls();
       }
 
-      const server = new VirtualServer(vfs, projectId, { deploymentId: deploymentId || undefined, entryPoint, runtime, provenance });
+      const server = new VirtualServer(vfs, projectId, { deploymentId: deploymentId || undefined, entryPoint, runtime: resolvedRuntime, provenance });
       serverRef.current = server;
 
       const compiled = await withTimeout(server.compileProject(), COMPILE_TIMEOUT_MS, 'Compile');
@@ -1662,7 +1698,7 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
         setLoading(false);
       }
     }
-  }, [projectId, deploymentId, entryPoint, runtime, provenance]);
+  }, [projectId, deploymentId, entryPoint, resolvedRuntime, provenance]);
 
   const compileAndLoad = useCallback((preserveCurrentPath: boolean = false, showLoading: boolean = true) => {
     // Ahead of the in-flight check on purpose: a hidden preview's request is parked in the gate's own
@@ -1906,7 +1942,10 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
       return blobUrl ? `src="${blobUrl}"` : match;
     });
 
-    const navigationScript = generateNavigationScript(normalizedPath, supportsDirectEditing(runtime));
+    // The resolved runtime, not the prop: a project whose settings never named one is compiled as
+    // the fallback, and asking `supportsDirectEditing` about `undefined` answered "no toolbar" for a
+    // document that had just been stamped with the provenance the toolbar runs on.
+    const navigationScript = generateNavigationScript(normalizedPath, supportsDirectEditing(resolvedRuntime));
     
     const placementScript = generatePlacementScript();
     const injectedScripts = navigationScript + placementScript;
@@ -2080,6 +2119,11 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
         return;
       }
 
+      if (data.type === 'tree-levels') {
+        onTreeLevels?.(data);
+        return;
+      }
+
       if (data.type === 'tree-stale') {
         onTreeStale?.(data);
         return;
@@ -2124,7 +2168,7 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
     return () => {
       window.removeEventListener('message', handleMessage);
     };
-  }, [handleNavigation, onFocusSelection, onPlacementComplete, onTreeLevel, onTreeStale,
+  }, [handleNavigation, onFocusSelection, onPlacementComplete, onTreeLevel, onTreeLevels, onTreeStale,
       onStyleComputed, onStyleProbeResult, onSelectionResolved, onToolbarAction, onToolbarHover]);
 
 
@@ -2189,7 +2233,9 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
   return (
     <div ref={attachRoot} className="h-full flex flex-col">
       <Header />
-      {/* Mobile Layout - Single row with navigation and page selector */}
+      {/* Mobile Layout - Single row with navigation and page selector. Shown in quick edit too,
+          where the preview shares the screen with the Inspector and this is the only way to
+          drive it. */}
       <div className="border-b p-2 flex items-center gap-2 md:hidden">
         <div className="flex items-center gap-1">
           <Button
@@ -2245,6 +2291,7 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
           >
             <Crosshair className="h-3 w-3" />
           </Button>
+          {!simple && (
           <Button
             size="icon"
             variant="ghost"
@@ -2259,17 +2306,6 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
           >
             <LayoutGrid className="h-3 w-3" />
           </Button>
-          {onCaptureScreenshot && (
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-5 w-5"
-              onClick={handleCaptureClick}
-              disabled={!iframeReady || isCapturing}
-              title="Capture screenshot as thumbnail"
-            >
-              {isCapturing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Camera className="h-3 w-3" />}
-            </Button>
           )}
         </div>
 
@@ -2346,6 +2382,7 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
           >
             <Crosshair className="h-3 w-3" />
           </Button>
+          {!simple && (
           <Button
             size="icon"
             variant="ghost"
@@ -2360,17 +2397,6 @@ const MultipagePreviewComponent = forwardRef<MultipagePreviewHandle, MultipagePr
           >
             <LayoutGrid className="h-3 w-3" />
           </Button>
-          {onCaptureScreenshot && (
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-5 w-5"
-              onClick={handleCaptureClick}
-              disabled={!iframeReady || isCapturing}
-              title="Capture screenshot as thumbnail"
-            >
-              {isCapturing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Camera className="h-3 w-3" />}
-            </Button>
           )}
         </div>
 

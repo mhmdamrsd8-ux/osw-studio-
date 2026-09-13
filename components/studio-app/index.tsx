@@ -5,6 +5,9 @@ import { useSearchParams } from 'next/navigation';
 import { Project } from '@/lib/vfs/types';
 import { vfs } from '@/lib/vfs';
 import { Workspace } from '@/components/workspace';
+import { useWorkspaceStore } from '@/lib/stores/workspace';
+import { ViewModeProvider, useStudioView } from '@/components/view-mode-provider';
+import { STUDIO_ONLY_VIEWS } from '@/components/sidebar';
 import { GuidedTourProvider, useGuidedTour } from '@/components/guided-tour/context';
 import { GuidedTourOverlay } from '@/components/guided-tour/overlay';
 import { PageLayout } from '@/components/page-layout';
@@ -38,6 +41,7 @@ function StudioInner() {
   const docParam = searchParams.get('doc');
   const projectParam = searchParams.get('project');
 
+  const studioView = useStudioView();
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   /** True while a `?project=` link resolves, so the view it landed on does not render first. */
   const [restoringProject, setRestoringProject] = useState(() => !!projectParam);
@@ -236,6 +240,32 @@ function StudioInner() {
     }
   }, [selectedProject, setActiveProjectId]);
 
+  /**
+   * Switching to the simple view while on a page it does not offer.
+   *
+   * The menu loses Templates, Skills and Interviews, so staying put would leave someone on a view
+   * with no way back to it. Read from the menu's own table rather than restated here, so a view
+   * that changes hands does not have to be remembered in two places.
+   */
+  useEffect(() => {
+    if (studioView) return;
+    if (STUDIO_ONLY_VIEWS.includes(currentView)) setCurrentView('dashboard');
+  }, [studioView, currentView]);
+
+  /**
+   * In the simple view a project opens into quick edit, as it does in server mode.
+   *
+   * Server mode gets there by route (`/w/{id}/quick/{projectId}`), which this tree has none of, so
+   * the surface is set alongside the selection instead, and cleared on the way out. The agent's
+   * mode is untouched: quick edit edits the way `code` does, and whatever the person last picked is
+   * still what they come back to.
+   */
+  useEffect(() => {
+    if (studioView || !selectedProject) return;
+    useWorkspaceStore.getState().setQuickEdit(true);
+    return () => { useWorkspaceStore.getState().setQuickEdit(false); };
+  }, [studioView, selectedProject]);
+
   useEffect(() => {
     const handleTourNavigateHome = () => {
       setSelectedProject(null);
@@ -398,10 +428,15 @@ function StudioInner() {
 
 export function StudioApp() {
   return (
-    <GuidedTourProvider>
-      <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-[#0a0a0a]"><p className="text-zinc-400">Loading...</p></div>}>
-        <StudioInner />
-      </React.Suspense>
-    </GuidedTourProvider>
+    // Browser mode's equivalent of the workspace layout's provider. Without one the chrome reads
+    // the context default and shows the studio however this device is set. `initialStudioView` is null
+    // because there is no server render to seed it from; the provider reads storage instead.
+    <ViewModeProvider initialStudioView={null}>
+      <GuidedTourProvider>
+        <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-[#0a0a0a]"><p className="text-zinc-400">Loading...</p></div>}>
+          <StudioInner />
+        </React.Suspense>
+      </GuidedTourProvider>
+    </ViewModeProvider>
   );
 }

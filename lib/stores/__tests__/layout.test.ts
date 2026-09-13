@@ -334,3 +334,51 @@ describe('layout slice', () => {
     });
   });
 });
+
+/**
+ * Where the three panels a fresh workspace opens with actually sit, and which one gives way.
+ *
+ * The order list does both jobs: it places the open panels left to right, and `pickEvictionTarget`
+ * walks it from the right to decide what closes when a fourth is opened. So "chat and preview lead"
+ * and "a third panel does not replace preview" are the same fact stated twice, and the second is the
+ * one that was wrong before: with preview last among the visible three, opening the Inspector or the
+ * editor took the preview away.
+ */
+describe('the panels a fresh workspace opens with', () => {
+  let store: ReturnType<typeof createLayoutStore>;
+
+  beforeEach(() => {
+    for (const key of Object.keys(mockLocalStorage)) delete mockLocalStorage[key];
+    store = createLayoutStore();
+  });
+
+  it('are chat, preview and files, in that order', () => {
+    // Asserted through visiblePanelKeys rather than the raw order, because that is what the
+    // workspace renders from: the order also carries panels that start closed.
+    expect(visiblePanelKeys(store.getState())).toEqual(['chat', 'preview', 'files']);
+  });
+
+  it('gives up files, not preview, to make room for a fourth', () => {
+    const open = visiblePanelKeys(store.getState());
+    const panels = store.getState().panelOrder.map((key) => ({ key, open: open.includes(key) }));
+
+    expect(pickEvictionTarget(panels, 'editor')).toBe('files');
+    expect(pickEvictionTarget(panels, 'checkpoints')).toBe('files');
+  });
+
+  it('keeps preview for the Inspector, which needs it, and still takes files', () => {
+    const open = visiblePanelKeys(store.getState());
+    const panels = store.getState().panelOrder.map((key) => ({ key, open: open.includes(key) }));
+
+    expect(pickEvictionTarget(panels, 'elements')).toBe('files');
+  });
+
+  it('leaves a saved order alone, so an existing arrangement is not rearranged', () => {
+    mockLocalStorage['osw-workspace-panel-order'] = JSON.stringify(
+      ['chat', 'files', 'editor', 'skills', 'console', 'preview', 'elements', 'checkpoints', 'debug'],
+    );
+    store.getState().initLayout();
+
+    expect(visiblePanelKeys(store.getState())).toEqual(['chat', 'files', 'preview']);
+  });
+});

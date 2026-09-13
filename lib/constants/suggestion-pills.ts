@@ -26,3 +26,29 @@ export const SUGGESTION_PILLS: SuggestionPill[] = [
     prompt: 'Set up the workspace for building an animated marketing site: use Handlebars templating so pages share a layout, load Tailwind CSS and Motion from a CDN, note the stack and conventions in .PROMPT.md, and scaffold a home page with a shared header and footer and a Motion entrance animation.',
   },
 ];
+
+// Starters for quick edit, where the project already exists and a person is looking at a page of it.
+// The build starters above are wrong there: they describe making a site rather than changing one.
+// A project that defines its own suggestions overrides these.
+export const QUICK_EDIT_PILLS: SuggestionPill[] = [
+  {
+    id: 'quick-reword',
+    label: 'Reword this page',
+    prompt: 'Rewrite the text on the page I am looking at so it reads more clearly and naturally, keeping the same layout, structure and links.',
+  },
+  {
+    id: 'quick-colours',
+    label: 'Change the colours',
+    prompt: 'Update the colour scheme of this site so it still looks consistent across every page, keeping the same layout and structure.',
+  },
+  {
+    id: 'quick-section',
+    label: 'Add a section',
+    prompt: 'Add a new section to the page I am looking at, matching the existing design, and tell me what you added.',
+  },
+  {
+    id: 'quick-mobile',
+    label: 'Fix it on a phone',
+    prompt: 'Check how the page I am looking at behaves on a narrow phone screen and fix anything that overflows, overlaps or is too small to read.',
+  },
+];

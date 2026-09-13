@@ -157,6 +157,53 @@ describe('reduceTree', () => {
     expect(requests).toEqual([{ type: 'tree-request', nodeId: null }]);
     expect(state.nodes.size).toBe(0);
   });
+
+  describe('reveal', () => {
+    const levels = [
+      { parentId: null, nodes: [node('1', { hasChildren: true }), node('9')], truncated: 0 },
+      { parentId: '1', nodes: [node('2', { hasChildren: true })], truncated: 0 },
+      { parentId: '2', nodes: [node('3')], truncated: 0 },
+    ];
+
+    it('opens every ancestor of the revealed node and selects it', () => {
+      const { state } = reduceTree(emptyTreeState(), { type: 'reveal', levels, path: ['1', '2', '3'] });
+      expect(state.selectedId).toBe('3');
+      // The ancestors open; the node itself is a leaf here and is not expanded.
+      expect([...state.expanded].sort()).toEqual(['1', '2']);
+      expect(state.nodes.has('3')).toBe(true);
+    });
+
+    it('puts the revealed node on screen, which is the point of it', () => {
+      const { state } = reduceTree(emptyTreeState(), { type: 'reveal', levels, path: ['1', '2', '3'] });
+      expect(flattenTree(state).filter((r) => r.kind === 'node').map((r) => r.node.id)).toEqual(['1', '2', '3', '9']);
+    });
+
+    it('asks the frame for nothing: the levels it needs already came with the reply', () => {
+      const { requests } = reduceTree(emptyTreeState(), { type: 'reveal', levels, path: ['1', '2', '3'] });
+      expect(requests).toEqual([]);
+    });
+
+    it('leaves the tree alone when the frame could not resolve the node', () => {
+      const before = build([{ parentId: null, nodes: [node('1')] }]);
+      const { state } = reduceTree(before, { type: 'reveal', levels: [], path: [] });
+      expect(state).toBe(before);
+    });
+
+    it('replaces what the panel held rather than merging into it', () => {
+      // A tree from a document that has since been replaced. Merging would leave its rows behind.
+      const stale = build([{ parentId: null, nodes: [node('77'), node('78')] }]);
+      const { state } = reduceTree(stale, { type: 'reveal', levels, path: ['1', '2', '3'] });
+      expect(state.nodes.has('77')).toBe(false);
+      expect(state.children.get(null)).toEqual(['1', '9']);
+    });
+
+    it('keeps the truncation count for a level that came back capped', () => {
+      const capped = [{ parentId: null, nodes: [node('1', { hasChildren: true })], truncated: 12 }];
+      const { state } = reduceTree(emptyTreeState(), { type: 'reveal', levels: capped, path: ['1'] });
+      expect(state.truncated.get(null)).toBe(12);
+    });
+  });
+
 });
 
 describe('flattenTree', () => {

@@ -6,6 +6,7 @@ import { Project } from '@/lib/vfs/types';
 import type { DebugEvent } from '@/lib/stores/types';
 import type { GenerationTask } from '@/lib/stores/types';
 import { ChevronDown } from 'lucide-react';
+import { parseToolArgs, type ActionKind } from '@/lib/agent-activity/parse-command';
 
 interface GenerationShelfProps {
   selectedProject: Project | null;
@@ -18,69 +19,33 @@ interface ActivityItem {
   status: 'executing' | 'completed' | 'failed';
 }
 
+const SHELF_VERBS: Record<ActionKind, [running: string, done: string]> = {
+  write: ['Writing', 'Wrote'],
+  read: ['Reading', 'Read'],
+  edit: ['Editing', 'Edited'],
+  list: ['Listing', 'Listed'],
+  search: ['Searching', 'Searched'],
+  create: ['Creating', 'Created'],
+  delete: ['Removing', 'Removed'],
+  move: ['Moving', 'Moved'],
+  copy: ['Copying', 'Copied'],
+  evaluate: ['Evaluating', 'Evaluated'],
+  delegate: ['Delegating', 'Delegated'],
+  lookup: ['Looking up', 'Looked up'],
+  image: ['Generating', 'Generated'],
+  database: ['Querying', 'Queried'],
+  build: ['Building', 'Built'],
+  plan: ['Planning', 'Planned'],
+  preview: ['Opening', 'Opened'],
+  run: ['Running', 'Ran'],
+  other: ['Running', 'Ran'],
+};
+
 function parseBashAction(argsJson: string, status: string): { verb: string; target: string } | null {
-  try {
-    const args = JSON.parse(argsJson);
-    const cmd = (args.command ?? args.cmd ?? '').trim();
-    if (!cmd) return null;
-
-    const isRunning = status === 'executing';
-
-    if (/^cat\s+>/.test(cmd) || /<<\s*'?EOF/.test(cmd)) {
-      const match = cmd.match(/^cat\s+>\s*(\S+)/) || cmd.match(/>\s*(\S+)\s*<</);
-      const file = match?.[1] || 'file';
-      return { verb: isRunning ? 'Writing' : 'Wrote', target: file };
-    }
-
-    if (/^(cat|head|tail|nl)\s+/.test(cmd) && !/>/.test(cmd)) {
-      const parts = cmd.split(/\s+/);
-      const file = parts[parts.length - 1];
-      return { verb: isRunning ? 'Reading' : 'Read', target: file };
-    }
-
-    if (/^(sed|ss)\s+/.test(cmd)) {
-      const match = cmd.match(/\s(\S+)\s*$/);
-      const file = match?.[1] || 'file';
-      return { verb: isRunning ? 'Editing' : 'Edited', target: file };
-    }
-
-    if (/^(ls|tree|find)\s*/.test(cmd)) {
-      return { verb: isRunning ? 'Listing' : 'Listed', target: cmd.split(/\s+/)[1] || '/' };
-    }
-
-    if (/^(grep|rg)\s+/.test(cmd)) {
-      return { verb: isRunning ? 'Searching' : 'Searched', target: cmd.split(/\s+/).slice(1, 3).join(' ') };
-    }
-
-    if (/^mkdir\s+/.test(cmd)) {
-      const dir = cmd.replace(/^mkdir\s+(-p\s+)?/, '').split(/\s+/)[0];
-      return { verb: isRunning ? 'Creating' : 'Created', target: dir };
-    }
-
-    if (/^(rm|rmdir)\s+/.test(cmd)) {
-      const target = cmd.split(/\s+/).pop() || '';
-      return { verb: isRunning ? 'Removing' : 'Removed', target };
-    }
-
-    if (/^(mv|cp)\s+/.test(cmd)) {
-      const parts = cmd.split(/\s+/);
-      return { verb: cmd.startsWith('mv') ? (isRunning ? 'Moving' : 'Moved') : (isRunning ? 'Copying' : 'Copied'), target: parts[parts.length - 1] || '' };
-    }
-
-    if (/^status\s+/.test(cmd)) {
-      return { verb: isRunning ? 'Evaluating' : 'Evaluated', target: 'progress' };
-    }
-
-    if (/^delegate\s+/.test(cmd)) {
-      const type = cmd.split(/\s+/)[1] || 'agent';
-      return { verb: isRunning ? 'Delegating' : 'Delegated', target: type };
-    }
-
-    const firstWord = cmd.split(/\s+/)[0];
-    return { verb: isRunning ? 'Running' : 'Ran', target: firstWord };
-  } catch {
-    return null;
-  }
+  const action = parseToolArgs(argsJson);
+  if (!action) return null;
+  const [running, done] = SHELF_VERBS[action.kind];
+  return { verb: status === 'executing' ? running : done, target: action.detail ?? '' };
 }
 
 function deriveActivity(events: DebugEvent[], since: number | null): { items: ActivityItem[]; total: number } {

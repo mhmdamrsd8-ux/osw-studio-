@@ -8,6 +8,7 @@ import {
 import { cn } from '@/lib/utils';
 import { configManager } from '@/lib/config/storage';
 import { hasAnyConnectedProvider } from '@/lib/llm/providers/connection-status';
+import { useStudioView } from '@/components/view-mode-provider';
 import { ModelsPane } from '@/components/providers-models/models-pane';
 import { ConnectionsPane } from '@/components/providers-models/connections-pane';
 import { TemplatesPane } from '@/components/providers-models/templates-pane';
@@ -24,6 +25,8 @@ import {
   SelectTrigger,
 } from '@/components/ui/select';
 import { MailView } from '@/components/views/mail-view';
+import { UsersView } from '@/components/views/users-view';
+import { Users as UsersIcon } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Pane registry
@@ -37,7 +40,8 @@ export type SettingsPane =
   | 'costs'
   | 'permissions'
   | 'data'
-  | 'mail';
+  | 'mail'
+  | 'users';
 
 interface PaneDef {
   id: SettingsPane;
@@ -45,6 +49,16 @@ interface PaneDef {
   icon: React.ReactNode;
   /** Mail needs an instance behind it, and a workspace to scope the settings to. */
   serverModeOnly?: boolean;
+  /** Administering members is the workspace owner's, not every member's. */
+  ownerOnly?: boolean;
+  /**
+   * Hidden in the simple view.
+   *
+   * The test is whether someone can finish their own editing loop without it, not whether it looks
+   * advanced: Connections and Models stay, because a person who cannot choose a provider or a model
+   * cannot use the thing at all.
+   */
+  studioOnly?: boolean;
 }
 
 const PANES: PaneDef[] = [
@@ -55,7 +69,8 @@ const PANES: PaneDef[] = [
   { id: 'costs',       label: 'Cost Tracking', icon: <DollarSign className="size-4 shrink-0" /> },
   { id: 'permissions', label: 'Permissions',   icon: <Shield className="size-4 shrink-0" /> },
   { id: 'data',        label: 'Data',          icon: <Database className="size-4 shrink-0" /> },
-  { id: 'mail',        label: 'Mail',          icon: <Mail className="size-4 shrink-0" />, serverModeOnly: true },
+  { id: 'mail',        label: 'Mail',          icon: <Mail className="size-4 shrink-0" />, serverModeOnly: true, studioOnly: true },
+  { id: 'users',       label: 'Users',         icon: <UsersIcon className="size-4 shrink-0" />, serverModeOnly: true, ownerOnly: true },
 ];
 
 /**
@@ -65,9 +80,24 @@ const PANES: PaneDef[] = [
  * the instance tier inside the same view. Without a workspace there is nothing for it to edit, so it
  * is hidden rather than shown empty.
  */
-function visiblePanes(workspaceId: string | undefined): PaneDef[] {
+/**
+ * Every pane id, for anything that has to recognise one without deciding whether to show it.
+ *
+ * Derived rather than restated: the URL parser used to keep its own list, so a pane added here was
+ * silently rejected there and the deep link fell back to the first pane.
+ */
+export const SETTINGS_PANE_IDS: readonly SettingsPane[] = PANES.map((p) => p.id);
+
+export function visiblePanes(workspaceId: string | undefined, isOwner: boolean | null, studioView: boolean): PaneDef[] {
   const serverMode = process.env.NEXT_PUBLIC_SERVER_MODE === 'true';
-  return PANES.filter((p) => !p.serverModeOnly || (serverMode && !!workspaceId));
+  return PANES.filter(
+    (p) =>
+      (!p.serverModeOnly || (serverMode && !!workspaceId)) &&
+      // Null while the answer is still in flight, which shows it rather than blinking it away from
+      // an owner who is entitled to it.
+      (!p.ownerOnly || isOwner !== false) &&
+      (!p.studioOnly || studioView)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +114,7 @@ function PaneContent({ pane, workspaceId }: { pane: SettingsPane; workspaceId?: 
     case 'permissions': return <PermissionsPane />;
     case 'data':        return <DataPane />;
     case 'mail':        return <MailView workspaceId={workspaceId} />;
+    case 'users':       return <UsersView workspaceId={workspaceId} embedded />;
   }
 }
 
@@ -95,12 +126,15 @@ function SettingsNav({
   activePane,
   onChange,
   workspaceId,
+  isOwner,
 }: {
   activePane: SettingsPane;
   onChange: (pane: SettingsPane) => void;
   workspaceId?: string;
+  isOwner?: boolean | null;
 }) {
-  const panes = visiblePanes(workspaceId);
+  const studioView = useStudioView();
+  const panes = visiblePanes(workspaceId, isOwner ?? null, studioView);
   const containerRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = useState(false);
@@ -225,6 +259,22 @@ export function UnifiedSettings({
   activePane: controlledPane,
   workspaceId,
 }: UnifiedSettingsProps) {
+  // Owners administer their own members; an instance admin does so in every workspace.
+  const [isOwner, setIsOwner] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_SERVER_MODE !== 'true') {
+      setIsOwner(false);
+      return;
+    }
+    fetch('/api/auth/me')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const roles = data?.user?.workspaceRoles as Record<string, string> | undefined;
+        setIsOwner(data?.user?.isAdmin === true || (!!workspaceId && roles?.[workspaceId] === 'owner'));
+      })
+      .catch(() => setIsOwner(false));
+  }, [workspaceId]);
   const defaultPane = initialPane ?? (hasAnyConnectedProvider() ? 'models' : 'connections');
   const [internalPane, setInternalPane] = useState<SettingsPane>(defaultPane);
 
@@ -242,7 +292,7 @@ export function UnifiedSettings({
   if (showSidebar) {
     return (
       <div className="flex flex-col md:flex-row h-full min-h-0">
-        <SettingsNav activePane={currentPane} onChange={setInternalPane} />
+        <SettingsNav activePane={currentPane} onChange={setInternalPane} workspaceId={workspaceId} isOwner={isOwner} />
         <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-4 md:p-6">
           <PaneContent pane={currentPane} workspaceId={workspaceId} />
         </div>

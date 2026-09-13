@@ -72,7 +72,11 @@ async function vfsShellExecute(
     return { stdout: '', stderr: 'No valid command arguments provided', exitCode: 2 };
   }
 
-  // Handle ; separator - execute all sequentially regardless of exit codes
+  // Handle ; separator - execute all sequentially regardless of exit codes.
+  // Each segment goes back through vfsShellExecute, not vfsShellExecuteSingle: a segment can
+  // still contain a pipe, and only this function splits those. Recursing on Single silently
+  // dropped every `| wc -l` that appeared inside a chain. Terminates because the split removed
+  // the operator this branch matched on.
   if (cleanCmd.some(arg => arg === ';')) {
     const commands: string[][] = [];
     let currentCmd: string[] = [];
@@ -98,7 +102,7 @@ async function vfsShellExecute(
     let lastExitReason: string | undefined;
 
     for (const singleCmd of commands) {
-      const result = await vfsShellExecuteSingle(vfs, projectId, singleCmd, undefined, ctx);
+      const result = await vfsShellExecute(vfs, projectId, singleCmd, undefined, ctx);
       if (result.stdout) allStdout.push(result.stdout);
       if (result.stderr) allStderr.push(result.stderr);
       lastExitCode = result.exitCode;
@@ -138,7 +142,7 @@ async function vfsShellExecute(
     let lastExitReason: string | undefined;
 
     for (const singleCmd of commands) {
-      const result = await vfsShellExecuteSingle(vfs, projectId, singleCmd, undefined, ctx);
+      const result = await vfsShellExecute(vfs, projectId, singleCmd, undefined, ctx);
       if (result.stdout) allStdout.push(result.stdout);
       if (result.stderr) allStderr.push(result.stderr);
       lastExitReason = result.exitReason;
@@ -184,7 +188,7 @@ async function vfsShellExecute(
     // Execute commands sequentially, stop on first success
     let lastResult: ShellResult = { stdout: '', stderr: '', exitCode: 1 };
     for (const singleCmd of commands) {
-      lastResult = await vfsShellExecuteSingle(vfs, projectId, singleCmd, undefined, ctx);
+      lastResult = await vfsShellExecute(vfs, projectId, singleCmd, undefined, ctx);
       if (lastResult.exitCode === 0) {
         return lastResult;
       }

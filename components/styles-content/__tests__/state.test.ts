@@ -588,6 +588,21 @@ describe('the one message the panel shows about losses', () => {
     expect(prompt).toContain('`border-radius`');
     expect(prompt).toContain('inline style');
   });
+
+  it('names the value that was asked for, not just the property', () => {
+    const state = twoLosses();
+    const prompt = lossAgentPrompt(lostOverrides(state), state.declarations);
+
+    // The agent is being asked to make this value stick, so the value has to be in the request.
+    expect(prompt).toContain(`\`padding-block: ${state.declarations['padding-block']}\``);
+  });
+
+  it('falls back to the property alone when this session set no value for it', () => {
+    const prompt = lossAgentPrompt(lostOverrides(twoLosses()), {});
+
+    expect(prompt).toContain('`padding-block`');
+    expect(prompt).not.toContain('padding-block:');
+  });
 });
 
 describe('declarationBlock', () => {

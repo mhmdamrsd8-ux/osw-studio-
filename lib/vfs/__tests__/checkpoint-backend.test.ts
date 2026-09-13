@@ -362,6 +362,21 @@ describe('checkpoint backend coverage', () => {
       expect(updateProject).not.toHaveBeenCalled();
     });
 
+    it('leaves a runtime alone when the checkpoint carries none', async () => {
+      // The contrast with 'clears a setting that did not exist at the checkpoint' above, and it is
+      // deliberate: a project is never meant to have no runtime, so a snapshot without one does not
+      // distinguish "had none" from "could not read one" -- and older snapshots are full of the
+      // latter, because capture read `settings?.runtime` off settings stored as a JSON string.
+      // Deleting on that answer is what made a selected runtime reset itself after an undo.
+      project = { ...project, settings: {} };
+      const cp = await checkpointManager.createCheckpoint(PROJECT_ID, 'Before a runtime was set');
+
+      project = { ...project, settings: { ...project.settings, runtime: 'react' } };
+      await checkpointManager.restoreCheckpoint(cp.id);
+
+      expect(project.settings.runtime).toBe('react');
+    });
+
     it('does not restore a field outside the covered set', async () => {
       project = { ...project, name: 'Original' };
       const cp = await checkpointManager.createCheckpoint(PROJECT_ID, 'Before rename');

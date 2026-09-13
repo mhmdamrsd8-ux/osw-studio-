@@ -18,6 +18,7 @@ import { TelemetryBootstrap } from '@/components/telemetry-bootstrap';
 import { useProviderAutoAssign } from '@/lib/hooks/use-provider-auto-assign';
 import { useModelConfigSignal } from '@/lib/hooks/use-model-config-signal';
 import { Spinner } from '@/components/ui/spinner';
+import { useStudioView } from '@/components/view-mode-provider';
 
 type View = 'dashboard' | 'projects' | 'templates' | 'skills' | 'interviews' | 'deployments' | 'users' | 'workspaces' | 'mail' | 'docs' | 'settings';
 
@@ -26,6 +27,8 @@ interface PageWrapperProps {
   workspaceId?: string;
   settingsTab?: string;
   autoCreateProject?: boolean;
+  /** Set by the quick-edit route: open this project straight into the fullscreen dock. */
+  quickEditProjectId?: string;
 }
 
 /**
@@ -67,10 +70,14 @@ function getViewRoute(view: string, workspaceId?: string): string {
   return routes[view] || `${base}/projects`;
 }
 
-function PageWrapperInner({ view, workspaceId, settingsTab, autoCreateProject }: PageWrapperProps) {
+function PageWrapperInner({ view, workspaceId, settingsTab, autoCreateProject, quickEditProjectId }: PageWrapperProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const projectParam = searchParams.get('project');
+  // Quick edit names its project in the path rather than a search param, but everything downstream,
+  // the restore, the spinner, the sidebar suppression, is the same, so it joins here.
+  const quickEdit = !!quickEditProjectId;
+  const studioView = useStudioView();
+  const projectParam = quickEditProjectId ?? searchParams.get('project');
 
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   /**
@@ -98,6 +105,13 @@ function PageWrapperInner({ view, workspaceId, settingsTab, autoCreateProject }:
     useWorkspaceStore.getState().reattachServerTasks();
   }, []);
 
+  // The route decides the surface; the agent's mode is the person's own setting and stays put.
+  useEffect(() => {
+    if (!quickEdit) return;
+    useWorkspaceStore.getState().setQuickEdit(true);
+    return () => { useWorkspaceStore.getState().setQuickEdit(false); };
+  }, [quickEdit]);
+
   // Track pageview on view/project changes
   useEffect(() => {
     const path = selectedProject ? 'workspace' : view;
@@ -115,28 +129,45 @@ function PageWrapperInner({ view, workspaceId, settingsTab, autoCreateProject }:
    * navigation would remount the whole shell to change one search param.
    */
   const writeProjectParam = useCallback((id: string) => {
+    // The quick-edit route already carries the project in its path; adding the parameter as well
+    // would leave two ids in one URL that could disagree.
+    if (quickEdit) return;
     const url = new URL(window.location.href);
     url.searchParams.set('project', id);
     window.history.pushState({}, '', url.toString());
-  }, []);
+  }, [quickEdit]);
 
   const clearProjectParam = useCallback(() => {
+    if (quickEdit) return;
     const url = new URL(window.location.href);
     url.searchParams.delete('project');
     window.history.replaceState({}, '', url.toString());
-  }, []);
+  }, [quickEdit]);
 
   const handleProjectOpen = useCallback((project: Project, previewPath?: string) => {
+    // In the simple view a project opens into quick edit, which is the whole point of that view:
+    // the person it is for has no use for a four-panel editor. Every entry point, the projects
+    // list, the dashboard's recent link and the sidebar, comes through here, so this is the only
+    // place that has to know.
+    if (!studioView && workspaceId) {
+      track('project_open');
+      router.push(`/w/${workspaceId}/quick/${project.id}`);
+      return;
+    }
     setSelectedProject(project);
     setInitialPreviewPath(previewPath);
     writeProjectParam(project.id);
     track('project_open');
-  }, [writeProjectParam]);
+  }, [writeProjectParam, studioView, workspaceId, router]);
 
   const handleProjectClose = useCallback(() => {
+    if (quickEdit) {
+      router.push(getViewRoute('projects', workspaceId));
+      return;
+    }
     setSelectedProject(null);
     clearProjectParam();
-  }, [clearProjectParam]);
+  }, [clearProjectParam, quickEdit, router, workspaceId]);
 
   /**
    * Restore the project named in the URL, and honour Back: when the param goes away, close.
@@ -195,7 +226,7 @@ function PageWrapperInner({ view, workspaceId, settingsTab, autoCreateProject }:
     <Workspace
       project={selectedProject}
       onBack={handleProjectClose}
-      backLabel={`Back to ${VIEW_LABELS[view] ?? 'projects'}`}
+      backLabel={quickEdit ? 'Back to projects' : `Back to ${VIEW_LABELS[view] ?? 'projects'}`}
       workspaceId={workspaceId}
       initialPreviewPath={initialPreviewPath}
     />
@@ -236,12 +267,12 @@ function PageWrapperInner({ view, workspaceId, settingsTab, autoCreateProject }:
   );
 }
 
-export function PageWrapper({ view, workspaceId, settingsTab, autoCreateProject }: PageWrapperProps) {
+export function PageWrapper({ view, workspaceId, settingsTab, autoCreateProject, quickEditProjectId }: PageWrapperProps) {
   return (
     <GuidedTourProvider>
       {/* useSearchParams needs a boundary, and only the projects route provided one. */}
       <Suspense>
-        <PageWrapperInner view={view} workspaceId={workspaceId} settingsTab={settingsTab} autoCreateProject={autoCreateProject} />
+        <PageWrapperInner view={view} workspaceId={workspaceId} settingsTab={settingsTab} autoCreateProject={autoCreateProject} quickEditProjectId={quickEditProjectId} />
       </Suspense>
     </GuidedTourProvider>
   );

@@ -10,6 +10,7 @@ import { calculateItemSyncStatus, toTime } from './sync-types';
 import { batchFilesBySize, serializeFileContent, deserializeFileContent } from './sync-manager';
 import { notifyServerProjectsChanged } from './sync-events';
 import { vfs } from './index';
+import { normalizeProjectSettings } from './project-settings';
 import { saveManager } from './save-manager';
 import { logger } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -230,7 +231,30 @@ async function postProjectBatches(
 /**
  * Auto-sync a project to the server (non-blocking, silent by default)
  */
+/**
+ * Pushes in flight, one entry per project.
+ *
+ * Two pushes for one project must not overlap: the second would read the project before the first
+ * has written back the `lastSyncedAt` the server gave it, pushing a stamp older than the row the
+ * first just created, which the server answers with a 409 the user reads as "edited on another
+ * device". In memory rather than persisted, so a tab that dies mid-push leaves nothing unsyncable.
+ */
+const pushesInFlight = new Map<string, Promise<void>>();
+
 export async function autoSyncProject(projectId: string, silent = true): Promise<void> {
+  const inFlight = pushesInFlight.get(projectId);
+  if (inFlight) await inFlight.catch(() => { /* its own caller reported it */ });
+
+  const push = pushProject(projectId, silent);
+  pushesInFlight.set(projectId, push);
+  try {
+    await push;
+  } finally {
+    if (pushesInFlight.get(projectId) === push) pushesInFlight.delete(projectId);
+  }
+}
+
+async function pushProject(projectId: string, silent: boolean): Promise<void> {
   // Only sync in Server Mode
   if (process.env.NEXT_PUBLIC_SERVER_MODE !== 'true') {
     return;
@@ -243,10 +267,6 @@ export async function autoSyncProject(projectId: string, silent = true): Promise
       return;
     }
 
-    // Don't sync if already syncing
-    if (project.syncStatus === 'syncing') {
-      return;
-    }
 
     // Get all files
     const files = await vfs.listFiles(projectId);
@@ -455,7 +475,9 @@ export async function pullServerUpdates(projectId: string, showToast = true): Pr
       if (localProject) {
         localProject.name = serverProject.name;
         localProject.description = serverProject.description;
-        if (serverProject.settings) localProject.settings = serverProject.settings;
+        // Normalized: this is a value straight out of a JSON response, which is where settings
+        // stored as a string came from in the first place (see lib/vfs/project-settings.ts).
+        if (serverProject.settings) localProject.settings = normalizeProjectSettings(serverProject.settings);
         if (serverUpdatedAt !== null) localProject.updatedAt = new Date(serverUpdatedAt);
         localProject.lastSyncedAt = new Date();
         localProject.serverUpdatedAt = serverUpdatedAt !== null ? new Date(serverUpdatedAt) : new Date();

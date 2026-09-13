@@ -60,8 +60,23 @@ export async function lsCommand(env: ShellEnv): Promise<ShellResult> {
     return lsResult;
   }
 
-  // Single path: directory listing
+  // Single path: a file, else a directory listing. Without the file probe (which the
+  // multi-path branch above already does) `ls -la /bundle.js` listed the file as a directory,
+  // came back empty at exit 0, and read as a missing file.
   const lsPath = normalizePath(lsPaths[0]) || '/';
+  if (lsPaths.length === 1) {
+    try {
+      const file = await vfs.readFile(projectId, lsPath);
+      const fileResult: ShellResult = {
+        stdout: longFormat ? formatFileLong(file) : file.path,
+        stderr: '',
+        exitCode: 0
+      };
+      if (redirect) return applyRedirectGuarded(vfs, projectId, fileResult.stdout, redirect, ctx);
+      return fileResult;
+    } catch { /* not a file — fall through to the directory listing */ }
+  }
+
   let lsOutput: string;
   if (!recursive) {
     const files = await vfs.listDirectory(projectId, lsPath, { includeTransient: true });

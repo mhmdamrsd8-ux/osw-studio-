@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { EventProcessor, classifyBashCommand } from '../event-processor';
+import { EventProcessor } from '../event-processor';
 import type { DebugEvent } from '@/lib/stores/types';
 
 let idCounter = 0;
@@ -469,82 +469,6 @@ describe('EventProcessor', () => {
       expect(turns2).toHaveLength(1);
       expect(turns2[0].items[0].data).toBe('new start');
     });
-  });
-});
-
-describe('classifyBashCommand', () => {
-  it('returns bash for undefined', () => {
-    expect(classifyBashCommand(undefined)).toBe('bash');
-  });
-
-  it('returns agent for agent commands', () => {
-    expect(classifyBashCommand('agent explore "find auth"')).toBe('agent');
-  });
-
-  it('returns agent for delegate commands (backward compat)', () => {
-    expect(classifyBashCommand('delegate explore "find auth"')).toBe('agent');
-  });
-
-  it('returns status for status command', () => {
-    expect(classifyBashCommand('status')).toBe('status');
-  });
-
-  it('returns status for build command', () => {
-    expect(classifyBashCommand('build')).toBe('status');
-  });
-
-  it('returns write for cat with redirect', () => {
-    expect(classifyBashCommand('cat > /file.txt')).toBe('write');
-    expect(classifyBashCommand('cat >/file.txt')).toBe('write');
-    expect(classifyBashCommand('cat file.txt > /out.txt')).toBe('write');
-  });
-
-  it('returns write for heredoc', () => {
-    expect(classifyBashCommand('cat <<EOF')).toBe('write');
-    expect(classifyBashCommand("tee /file.txt <<-'HEREDOC'")).toBe('write');
-  });
-
-  it('returns write for sed -i', () => {
-    expect(classifyBashCommand('sed -i "s/old/new/g" file.txt')).toBe('write');
-  });
-
-  it('returns write for ss', () => {
-    expect(classifyBashCommand("ss /file.txt << 'EOF'")).toBe('write');
-  });
-
-  it('returns write for file-mutating commands', () => {
-    expect(classifyBashCommand('mkdir -p /src')).toBe('write');
-    expect(classifyBashCommand('touch /file.txt')).toBe('write');
-    expect(classifyBashCommand('rm /file.txt')).toBe('write');
-    expect(classifyBashCommand('mv /a.txt /b.txt')).toBe('write');
-    expect(classifyBashCommand('cp /a.txt /b.txt')).toBe('write');
-  });
-
-  it('returns write for echo with redirect', () => {
-    expect(classifyBashCommand('echo "hello" >> /file.txt')).toBe('write');
-    expect(classifyBashCommand('echo "hello" > /file.txt')).toBe('write');
-  });
-
-  it('returns bash for read-only commands', () => {
-    expect(classifyBashCommand('ls -la')).toBe('bash');
-    expect(classifyBashCommand('cat /file.txt')).toBe('bash');
-    expect(classifyBashCommand('grep -r "pattern" /src')).toBe('bash');
-  });
-
-  it('returns bash for cat with stderr redirect (not a write)', () => {
-    expect(classifyBashCommand('cat /file.txt 2>/dev/null')).toBe('bash');
-    expect(classifyBashCommand('cat /index.html && echo "---" && cat /src/App.tsx 2>/dev/null')).toBe('bash');
-  });
-
-  it('returns bash for echo without file redirect', () => {
-    expect(classifyBashCommand('echo "---"')).toBe('bash');
-    expect(classifyBashCommand('echo "hello"')).toBe('bash');
-  });
-
-  it('handles array input', () => {
-    expect(classifyBashCommand(['agent', 'task', '"prompt"'])).toBe('agent');
-    expect(classifyBashCommand(['delegate', 'task', '"prompt"'])).toBe('agent');
-    expect(classifyBashCommand(['ls', '-la'])).toBe('bash');
   });
 });
 

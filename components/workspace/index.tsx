@@ -8,7 +8,7 @@ import { FileExplorer } from '@/components/file-explorer';
 import { MultiTabEditor, openFileInEditor } from '@/components/editor/multi-tab-editor';
 import { MultipagePreview, MultipagePreviewHandle } from '@/components/preview/multipage-preview';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, MessageSquare, FolderTree, Code2, Eye, Settings, Save, Bug, RotateCcw, History, Terminal as TerminalIcon, Sparkles, ChevronDown, ChevronUp, EllipsisVertical, Upload, ListTree } from 'lucide-react';
+import { ArrowLeft, MessageSquare, FolderTree, Code2, Eye, Settings, Save, Bug, RotateCcw, History, Terminal as TerminalIcon, Sparkles, ChevronDown, ChevronUp, EllipsisVertical, Upload, ListTree, Undo2, Redo2 } from 'lucide-react';
 import { AppHeader, HeaderAction } from '@/components/ui/app-header';
 import { PendingImage, PendingAudio, PendingFile } from '@/lib/llm/multi-agent-orchestrator';
 import { configManager, migrateBackendKey } from '@/lib/config/storage';
@@ -18,6 +18,7 @@ import type { InterviewTemplate, InterviewHandoff } from '@/lib/interview/types'
 import { track } from '@/lib/telemetry';
 import { bucketInterviewTemplateId } from '@/lib/telemetry/tool-analytics';
 import { PANEL_MAP, pickEvictionTarget, visiblePanelKeys } from '@/lib/stores/slices/layout';
+import { PROJECT_BUSY_NOTICE } from '@/lib/stores/slices/orchestrator';
 import { useCostSettings } from '@/lib/hooks/use-cost-settings';
 import { getModelInputModalities } from '@/lib/llm/providers/registry';
 import { isProjectProviderReady } from '@/lib/llm/models/project-assignment';
@@ -65,6 +66,10 @@ import { applyStyleOverride, readOverriddenProperties, removeStyleOverride } fro
 import { ConsolePanel } from '@/components/console';
 import { drainRuntimeErrors, peekRuntimeErrors, formatRuntimeErrors } from '@/lib/preview/runtime-errors';
 import { supportsDirectEditing } from '@/lib/runtimes/registry';
+import { useMobileViewport } from '@/lib/hooks/use-mobile-viewport';
+import { SimpleThread } from '@/components/quick-edit/thread';
+import { splitRuns } from '@/lib/quick-edit/runs';
+import { undoTarget, redoTarget } from '@/lib/quick-edit/undo';
 
 interface WorkspaceProps {
   project: Project;
@@ -207,6 +212,9 @@ export function focusMessageContext<T extends { domPath: string }>(
   return { promptBlock: formatBlock(focus), generationFocus: focus };
 }
 
+/** The panel set quick edit shows, in order; the store's order is not consulted. */
+const QUICK_PANEL_ORDER = ['chat', 'preview', 'elements'];
+
 export function Workspace({ project, onBack, backLabel, workspaceId, initialPreviewPath }: WorkspaceProps) {
   // The page the preview is on, for suggestions that are scoped to particular pages. Null until the
   // preview reports one, which selectPromptSuggestions reads as "offer everything".
@@ -225,6 +233,19 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   const focusContext = useWorkspaceStore(s => s.focusContext);
   const focusIncluded = useWorkspaceStore(s => s.focusIncluded);
   const mode = useWorkspaceStore(s => s.mode);
+  /**
+   * Quick edit: the same desktop tree with the studio parts left out. Chat and preview only, no
+   * rail, no Deploy or Settings, the conversation as a thread of runs rather than a transcript.
+   * On a phone it is the site with the dock over it instead of the panel switcher.
+   */
+  const quick = useWorkspaceStore(s => s.quickEdit);
+  const [checkpointIds, setCheckpointIds] = useState<string[]>([]);
+  const [undoCursor, setUndoCursor] = useState<string | null>(null);
+  /** Quick edit's own panel pair, kept out of the store so the studio's saved layout is untouched. */
+  // The inspector starts closed: quick edit opens on the conversation and the page, and the
+  // inspector is something you reach for. Opened by its rail button, or by the preview
+  // toolbar's Style action on a selection.
+  const [quickPanels, setQuickPanels] = useState({ chat: true, preview: true, elements: false });
   const activeInterview = useWorkspaceStore(s => s.activeInterview);
   const runtimeErrors = useWorkspaceStore(s => s.runtimeErrors);
   const initialCheckpointId = useWorkspaceStore(s => s.initialCheckpointId);
@@ -232,6 +253,9 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   const backendEnabled = useWorkspaceStore(s => s.backendEnabled);
   const selectedDeploymentId = useWorkspaceStore(s => s.selectedDeploymentId);
   const activeMobilePanel = useWorkspaceStore(s => s.activeMobilePanel);
+  // Which of the two trees is on screen. Only the Inspector's frame plumbing reads it, to pick the
+  // iframe and the panel it is allowed to address.
+  const mobileViewport = useMobileViewport();
   const mobileOverflowOpen = useWorkspaceStore(s => s.mobileOverflowOpen);
   const placedBlocks = useWorkspaceStore(s => s.placedBlocks);
   const paletteOpen = useWorkspaceStore(s => s.paletteOpen);
@@ -285,6 +309,39 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     previewRef.current = handle;
     desktopPreviewRef.current = handle;
   }, []);
+  /**
+   * The *mobile* preview's handle, for the same reason the desktop one is kept separately.
+   *
+   * The Inspector runs on both trees now, and `sendToFrame` addresses one iframe. On a phone the
+   * desktop instance is mounted but CSS-hidden and its document is the wrong one to ask, so the
+   * frame plumbing resolves the handle by viewport rather than reaching for either directly.
+   *
+   * It still writes `previewRef` because the mobile mount always did (it was `ref={previewRef}`),
+   * and that ref's instance-ordering hazard is documented above and deliberately left as it was.
+   */
+  const mobilePreviewRef = useRef<MultipagePreviewHandle | null>(null);
+  const attachMobilePreview = useCallback((handle: MultipagePreviewHandle | null) => {
+    previewRef.current = handle;
+    mobilePreviewRef.current = handle;
+  }, []);
+  /**
+   * The mobile Inspector's own handle, for the same reason as the previews: both trees are
+   * mounted, so one shared ref would be owned by whichever committed last — the hidden one.
+   */
+  const mobileElementsPanelRef = useRef<ElementsPanelHandle>(null);
+  /**
+   * The visible tree, as a ref.
+   *
+   * The frame's replies are dispatched by handlers that sit in the preview's message-listener
+   * dependencies, so they have to keep stable identities; reading the viewport as a value would
+   * make each of them change when the breakpoint is crossed. A ref keeps them at `[]` deps and
+   * still answers with the current surface.
+   */
+  const mobileViewportRef = useRef(false);
+  mobileViewportRef.current = mobileViewport;
+  const inspectorTargets = useCallback(() => (mobileViewportRef.current
+    ? { panel: mobileElementsPanelRef.current, preview: mobilePreviewRef.current, surface: 'mobile' as const }
+    : { panel: elementsPanelRef.current, preview: desktopPreviewRef.current, surface: 'desktop' as const }), []);
   const generatingRef = useRef(false);
   const handleGenerateRef = useRef<((promptText?: string, images?: PendingImage[], audio?: PendingAudio[], files?: PendingFile[]) => Promise<void>) | null>(null);
   // Both declared before their handlers, which the Styles tab's callbacks need and which are defined
@@ -392,18 +449,28 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   
   // Console panel — visible by default for terminal-mode runtimes (Python, Lua), togglable for all
 
-  const showChat = useWorkspaceStore(s => s.showChat);
-  const showFiles = useWorkspaceStore(s => s.showFiles);
-  const showEditor = useWorkspaceStore(s => s.showEditor);
-  const showPreview = useWorkspaceStore(s => s.showPreview);
-  const showCheckpoints = useWorkspaceStore(s => s.showCheckpoints);
+  const storeShowChat = useWorkspaceStore(s => s.showChat);
+  const storeShowFiles = useWorkspaceStore(s => s.showFiles);
+  const storeShowEditor = useWorkspaceStore(s => s.showEditor);
+  const storeShowPreview = useWorkspaceStore(s => s.showPreview);
+  const storeShowCheckpoints = useWorkspaceStore(s => s.showCheckpoints);
+  // Quick edit fixes the panel set without touching the store, so it never writes into the layout
+  // the studio has saved.
+  // With both quick panels off there is nothing to look at, so the preview stands in.
+  const showChat = quick ? quickPanels.chat : storeShowChat;
+  const showFiles = !quick && storeShowFiles;
+  const showEditor = !quick && storeShowEditor;
+  const showPreview = quick ? quickPanels.preview || !quickPanels.chat : storeShowPreview;
+  const showCheckpoints = !quick && storeShowCheckpoints;
   const showDebugPanel = useWorkspaceStore(s => s.showDebugPanel);
   const showProjectSettingsModal = useWorkspaceStore(s => s.showProjectSettingsModal);
   const showSkillsPanel = useWorkspaceStore(s => s.showSkillsPanel);
-  const showConsole = useWorkspaceStore(s => s.showConsole);
+  const storeShowConsole = useWorkspaceStore(s => s.showConsole);
+  const showConsole = !quick && storeShowConsole;
   // Gates the preview's provenance instrumentation, which is off for everyone else: the publish,
   // export and thumbnail paths must never see `data-osw-src`, and flipping this recompiles.
-  const showElements = useWorkspaceStore(s => s.showElements);
+  const storeShowElements = useWorkspaceStore(s => s.showElements);
+  const showElements = quick ? quickPanels.elements : storeShowElements;
   // Subscribed, not read through `getState()`, because the Inspector's `Select element` button has
   // to *look* armed: the flag is set from two controls in two components, so only a subscription
   // re-renders this one when the other moves it.
@@ -424,7 +491,8 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   // Ref to imperatively reset panel sizes after reorder
   const panelGroupRef = useRef<import('react-resizable-panels').ImperativePanelGroupHandle | null>(null);
 
-  const panelOrder = useWorkspaceStore(s => s.panelOrder);
+  const storePanelOrder = useWorkspaceStore(s => s.panelOrder);
+  const panelOrder = quick ? QUICK_PANEL_ORDER : storePanelOrder;
   const draggingPanel = useWorkspaceStore(s => s.draggingPanel);
   const dropTarget = useWorkspaceStore(s => s.dropTarget);
 
@@ -618,7 +686,9 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   
   // Derived from PANEL_MAP for the same reason as visibleBefore above: a panel missing from this
   // count sizes every rendered panel as if there were one fewer.
-  const visiblePanelCount = useWorkspaceStore(s => visiblePanelKeys(s).length);
+  const storeVisiblePanelCount = useWorkspaceStore(s => visiblePanelKeys(s).length);
+  // Quick edit's pair is not in the store, so it is counted from the flags it actually renders.
+  const visiblePanelCount = quick ? Number(showChat) + Number(showPreview) + Number(showElements) : storeVisiblePanelCount;
   const baseSize = visiblePanelCount > 0 ? Math.floor(100 / visiblePanelCount) : 100;
 
   const getModelDisplayName = (modelId: string) => {
@@ -785,7 +855,11 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     // Which page the selection was made on. `domPath` carries no page identity, so this is the only
     // thing that stops a re-resolve after an in-preview navigation binding the selection to
     // whatever element the same path happens to hit on the new page.
-    focusPathRef.current = desktopPreviewRef.current?.getActivePath?.() ?? null;
+    // Asked of the surface the selection was made on, which the caller states. The mobile tree
+    // can make selections now that the Inspector runs there, and the desktop instance's active
+    // path is not the one this selection belongs to.
+    const madeOn = surface === 'mobile' ? mobilePreviewRef.current : desktopPreviewRef.current;
+    focusPathRef.current = madeOn?.getActivePath?.() ?? null;
   }, [carryFocusInclusion, clearFocusSelection]);
 
   // One handler per mount, so the surface is stated in the JSX that already knows it rather than
@@ -817,30 +891,44 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   // have to be lifted through here. Stable identities: `onTreeLevel`/`onTreeStale` sit in the
   // preview's message-listener dependencies, and an inline arrow would tear that listener down and
   // re-add it on every workspace render.
+  // Every one of these goes to the Inspector the viewport is showing: both trees can have one
+  // mounted, and a reply delivered to the hidden instance is a reply the person never sees.
   const handleTreeLevel = useCallback((message: Extract<PreviewMessage, { type: 'tree-level' }>) => {
-    elementsPanelRef.current?.handleTreeLevel(message);
-  }, []);
+    inspectorTargets().panel?.handleTreeLevel(message);
+  }, [inspectorTargets]);
+
+  const handleTreeLevels = useCallback((message: Extract<PreviewMessage, { type: 'tree-levels' }>) => {
+    inspectorTargets().panel?.handleTreeLevels(message);
+  }, [inspectorTargets]);
 
   const handleTreeStale = useCallback(() => {
-    elementsPanelRef.current?.handleTreeStale();
-  }, []);
+    inspectorTargets().panel?.handleTreeStale();
+  }, [inspectorTargets]);
 
   const handleStyleComputed = useCallback((message: Extract<PreviewMessage, { type: 'style-computed' }>) => {
-    elementsPanelRef.current?.handleStyleComputed(message);
-  }, []);
+    inspectorTargets().panel?.handleStyleComputed(message);
+  }, [inspectorTargets]);
 
   const handleStyleProbeResult = useCallback((message: Extract<PreviewMessage, { type: 'style-probe-result' }>) => {
-    elementsPanelRef.current?.handleStyleProbeResult(message);
-  }, []);
+    inspectorTargets().panel?.handleStyleProbeResult(message);
+  }, [inspectorTargets]);
 
   // Declared before `handleFrameReady`, which needs it: the frame-ready path is the one that asks
   // the new document to resolve the selection again.
+  /**
+   * The preview the Inspector is looking at: the one the viewport is showing.
+   *
+   * Both trees are mounted at once, so "the preview" is ambiguous without this. Reading it through
+   * a function rather than choosing a ref object keeps the choice current at call time, which
+   * matters because a viewport can change under a mounted panel.
+   */
   const sendToPreviewFrame = useCallback((message: PreviewHostMessage) => {
-    desktopPreviewRef.current?.sendToFrame(message);
-  }, []);
+    inspectorTargets().preview?.sendToFrame(message);
+  }, [inspectorTargets]);
 
   const handleFrameReady = useCallback(() => {
-    elementsPanelRef.current?.handleFrameReady();
+    const { panel, preview, surface } = inspectorTargets();
+    panel?.handleFrameReady();
     // A recompile mints a new document, so the `nodeId` in the focus context is dead while the
     // context itself survives — nothing clears it on frame-ready. `domPath` is the handle that
     // outlives the document, and this turns it back into one the frame can be asked about. The
@@ -848,15 +936,15 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     const action = focusReloadAction(
       useWorkspaceStore.getState().focusContext,
       focusPathRef.current,
-      desktopPreviewRef.current?.getActivePath?.() ?? null,
+      preview?.getActivePath?.() ?? null,
     );
     if (action.kind === 'none') return;
     if (action.kind === 'clear') {
-      clearFocusSelection('desktop');
+      clearFocusSelection(surface);
       return;
     }
     sendToPreviewFrame({ type: 'selection-resolve', domPath: action.domPath });
-  }, [sendToPreviewFrame, clearFocusSelection]);
+  }, [sendToPreviewFrame, clearFocusSelection, inspectorTargets]);
 
   /**
    * A button on the preview toolbar was pressed.
@@ -870,14 +958,27 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   }, [handleSidebarHover]);
 
   const handleToolbarAction = useCallback((message: Extract<PreviewMessage, { type: 'toolbar-action' }>) => {
-    const effect = applyToolbarAction(message.action, useWorkspaceStore.getState());
-    if (effect.tab) setElementsTab(effect.tab);
+    // Quick edit keeps its panel flags in local state, so the store's showElements/togglePanel
+    // would report and flip the wrong thing. What Style needs is "ensure the inspector is open",
+    // and togglePanel is only called when showElements is false -- so a layout that always reports
+    // closed, paired with a setter that opens rather than toggles, is both correct and immune to
+    // reading a stale flag out of this callback's closure.
+    const effect = applyToolbarAction(message.action, quick
+      ? { showElements: false, togglePanel: () => setQuickPanels((p) => ({ ...p, elements: true })) }
+      : useWorkspaceStore.getState());
+    // The toolbar is mounted against whichever preview is on screen, so the press is attributed
+    // to that surface.
+    const { surface } = inspectorTargets();
+    if (effect.tab) {
+      setElementsTab(effect.tab);
+      // Opening the Inspector is a panel flag, which on a phone is the active panel rather than
+      // one of a set shown side by side. Without this, Style opened a panel off screen.
+      if (surface === 'mobile') useWorkspaceStore.getState().setActiveMobilePanel('elements');
+    }
     if (effect.replaceImage) setImagePickerOpen(true);
     if (effect.editText) setTextPopoverOpen(true);
     if (effect.clearSelection) {
-      // The toolbar is only ever mounted against the desktop preview — the mobile mount is not
-      // wired to `onToolbarAction`, so no press can reach here from it.
-      clearFocusSelection('desktop');
+      clearFocusSelection(surface);
       // The frame never decides a selection is over, so the toolbar outlives the tool that made it
       // until this says otherwise.
       sendToPreviewFrame({ type: 'selection-clear' });
@@ -886,14 +987,23 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
       // The one place the flag is raised. Everything else either lowers it or, for a write naming
       // the same element, carries it — see `focusInclusionAfterWrite`.
       useWorkspaceStore.getState().setFocusIncluded(true);
+      // On a phone one panel is on screen at a time, so including an element and leaving the
+      // person on the preview hides the very thing they just added it to. Desktop shows the chat
+      // alongside and needs no move.
+      if (surface === 'mobile') useWorkspaceStore.getState().setActiveMobilePanel('chat');
     }
-  }, [sendToPreviewFrame, clearFocusSelection]);
+  }, [sendToPreviewFrame, clearFocusSelection, quick, inspectorTargets]);
 
   const handleOpenPreviewPanel = useCallback(() => {
+    // Same split as the toolbar action: in quick edit the preview is a local flag, not the store's.
+    if (quick) {
+      setQuickPanels((p) => ({ ...p, preview: true }));
+      return;
+    }
     if (!useWorkspaceStore.getState().showPreview) {
       useWorkspaceStore.getState().togglePanel('preview');
     }
-  }, []);
+  }, [quick]);
 
   /** Desktop only. Arms the preview's element picker from the Inspector's empty state. */
   const handleArmFocusTool = useCallback(() => {
@@ -999,9 +1109,26 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     }
   }, [project.id]);
 
+  /**
+   * The Styles tab handing a message to the chat rather than starting a run.
+   *
+   * The panel knows a property did not take, not what the person wants instead, so the text lands
+   * in the composer for them to finish and send. The chat is brought into view with it: on a phone
+   * that means making it the active panel, and in quick edit opening the panel if it is closed.
+   */
   const handleStyleAskAgent = useCallback((prompt: string) => {
-    void handleGenerateRef.current?.(prompt);
-  }, []);
+    const store = useWorkspaceStore.getState();
+    store.appendComposerDraft(prompt);
+    if (inspectorTargets().surface === 'mobile') {
+      store.setActiveMobilePanel('chat');
+      return;
+    }
+    if (quick) {
+      setQuickPanels((p) => ({ ...p, chat: true }));
+      return;
+    }
+    if (!store.showChat) store.togglePanel('chat');
+  }, [inspectorTargets, quick]);
 
   /**
    * The toolbar's **Replace** write, bound to this project.
@@ -1088,9 +1215,17 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     useWorkspaceStore.setState({ placedBlocks: [] });
   }, [placedBlocks]);
 
+  /** The preview as it is, at a width a model can read, for the composer's Screenshot item. */
+  const handleCaptureContextScreenshot = useCallback(
+    () => previewRef.current?.captureScreenshot(false, { outputWidth: 1280 }) ?? Promise.resolve(null),
+    [],
+  );
+
   const handleClosePreview = useCallback(() => {
-    useWorkspaceStore.getState().togglePanel('preview');
-  }, []);
+    // Quick edit's panels are the workspace's own flags, not the store's.
+    if (quick) setQuickPanels((p) => ({ ...p, preview: false }));
+    else useWorkspaceStore.getState().togglePanel('preview');
+  }, [quick]);
 
   const handleEnterFullscreen = useCallback(() => {
     useWorkspaceStore.getState().setFullscreenPreview(true);
@@ -1572,21 +1707,6 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
 
   }, [project.id]);
 
-  const handleCaptureScreenshot = useCallback(async (screenshot: string) => {
-    try {
-      const proj = await vfs.getProject(project.id);
-      proj.previewImage = screenshot;
-      proj.previewUpdatedAt = new Date();
-      await vfs.updateProject(proj);
-      // preview_image is a synced column, so the thumbnail has to reach the server too.
-      vfs.scheduleAutoSync(proj.id);
-      toast.success('Thumbnail updated');
-    } catch (err) {
-      logger.error('Failed to save screenshot:', err);
-      toast.error('Failed to save thumbnail');
-    }
-  }, [project.id]);
-
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const isMac = navigator.platform?.toLowerCase().includes('mac');
@@ -1640,7 +1760,22 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     setPendingRestore({ preview, description, restore });
   }, []);
 
+  /**
+   * Refuse anything that rewinds the project while a run is working on it.
+   *
+   * Restore and Retry roll files back, and Retry also truncates the conversation, both before the
+   * generation they end with is attempted. That generation is refused while a task is live, which
+   * would leave the rollback standing on its own: files and history rewound, no new run, and the
+   * original still going and about to write over what was just undone.
+   */
+  const refuseWhileGenerating = useCallback(() => {
+    if (!useWorkspaceStore.getState().isProjectGenerating(project.id)) return false;
+    toast.info(PROJECT_BUSY_NOTICE);
+    return true;
+  }, [project.id]);
+
   const handleRestoreCheckpoint = useCallback(async (checkpointId: string, description?: string, options?: { isDiscard?: boolean }) => {
+    if (refuseWhileGenerating()) return;
     try {
       // First check if checkpoint exists
       const exists = await checkpointManager.checkpointExists(checkpointId);
@@ -1655,6 +1790,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
           checkpointManager.restoreCheckpoint(checkpointId)
         );
         if (success) {
+          setUndoCursor(checkpointId);
           await remountBackendContext();
           toast.success(`Restored to: ${description || 'checkpoint'}`);
           track(options?.isDiscard ? 'changes_discarded' : 'checkpoint_restore');
@@ -1676,7 +1812,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
       logger.error('Error restoring checkpoint:', error);
       toast.error('Failed to restore checkpoint');
     }
-  }, [handleFilesChange, project.id, remountBackendContext, runRestore]);
+  }, [handleFilesChange, project.id, remountBackendContext, runRestore, refuseWhileGenerating]);
 
   const handleScrollToCheckpoint = useCallback((checkpointId: string) => {
     if (!useWorkspaceStore.getState().showChat) useWorkspaceStore.getState().togglePanel('chat');
@@ -1691,6 +1827,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
   }, []);
 
   const handleRetry = useCallback(async (checkpointId: string) => {
+    if (refuseWhileGenerating()) return;
     try {
       // First check if checkpoint exists
       const exists = await checkpointManager.checkpointExists(checkpointId);
@@ -1779,7 +1916,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
       logger.error('Error during retry:', error);
       toast.error('Failed to retry');
     }
-  }, [handleFilesChange, project.id, debugEvents, remountBackendContext, runRestore]);
+  }, [handleFilesChange, project.id, debugEvents, remountBackendContext, runRestore, refuseWhileGenerating]);
 
   const storeStartGeneration = useWorkspaceStore(s => s.startGeneration);
 
@@ -1798,7 +1935,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     if (placedBlocks.length > 0) contextParts.push(formatPlacedBlocksContext(placedBlocks));
     if (contextParts.length > 0) messageContent = contextParts.join('\n\n') + '\n\n' + messageContent;
 
-    await storeStartGeneration(messageContent, images, {
+    const started = await storeStartGeneration(messageContent, images, {
       mode,
       chatMode: mode === 'chat',
       projectId: project.id,
@@ -1812,6 +1949,11 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
       audio,
       files,
     });
+
+    // Nothing was sent: the project was already busy, or there is no model or key configured. The
+    // request is still in the composer, so spending the inclusion and dropping the attachments and
+    // placed blocks here would throw away the context for a message the person still has to send.
+    if (!started) return;
 
     // Post-generation UI cleanup.
     //
@@ -1841,6 +1983,9 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
 
   const handleStartInterview = useCallback(async (template: InterviewTemplate) => {
     if (!project.id) return;
+    // Ahead of clearChat: an interview starts from an empty conversation, so the wipe happens
+    // before the start and a refused start would have destroyed the transcript for nothing.
+    if (refuseWhileGenerating()) return;
     track('interview_started', { template: bucketInterviewTemplateId(template.id) });
     // Start fresh: an interview should not append onto a prior conversation.
     await useWorkspaceStore.getState().clearChat(project.id);
@@ -1850,10 +1995,13 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
       projectId: project.id,
       templateId: template.id,
     });
-  }, [project.id, storeSetActiveInterview, storeStartGeneration]);
+  }, [project.id, storeSetActiveInterview, storeStartGeneration, refuseWhileGenerating]);
 
   const handleHandoff = useCallback(async (handoff: InterviewHandoff) => {
     if (!project.id) return;
+    // Same wipe, same ordering. The button is already disabled while generating; this is the
+    // guarantee that does not depend on the button.
+    if (refuseWhileGenerating()) return;
     track('handoff_used', { mode: handoff.mode });
     // End the interview and start the follow-up task fresh in its target mode.
     storeSetActiveInterview(null);
@@ -1864,7 +2012,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
       chatMode: handoff.mode === 'chat',
       projectId: project.id,
     });
-  }, [project.id, storeSetActiveInterview, storeSetMode, storeStartGeneration]);
+  }, [project.id, storeSetActiveInterview, storeSetMode, storeStartGeneration, refuseWhileGenerating]);
 
   handleGenerateRef.current = handleGenerate;
 
@@ -1893,6 +2041,37 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     useWorkspaceStore.getState().setRuntimeErrors([]);
   }, []);
 
+  /**
+   * Undo and redo walk the project's checkpoints, oldest first.
+   *
+   * The list is re-read whenever a checkpoint lands, and the cursor goes back to the newest at the
+   * same moment, because a new checkpoint after an undo is a new branch: there is nothing to redo
+   * into any more. Restoring anything, from here or the thread, moves the cursor to it.
+   */
+  const latestCheckpointEventId = useMemo(() => {
+    for (let i = debugEvents.length - 1; i >= 0; i--) {
+      if (debugEvents[i].event === 'checkpoint_created') return debugEvents[i].id;
+    }
+    return null;
+  }, [debugEvents]);
+  useEffect(() => {
+    let cancelled = false;
+    setUndoCursor(null);
+    checkpointManager.getCheckpoints(project.id).then((list) => {
+      // getCheckpoints is newest first.
+      if (!cancelled) setCheckpointIds(list.map((c) => c.id).reverse());
+    }).catch(() => { /* a failed read leaves undo where it was */ });
+    return () => { cancelled = true; };
+  }, [project.id, latestCheckpointEventId]);
+  const undoTargetId = undoTarget(checkpointIds, undoCursor);
+  const redoTargetId = redoTarget(checkpointIds, undoCursor);
+  const handleUndo = useCallback(() => {
+    if (undoTargetId) void handleRestoreCheckpoint(undoTargetId, 'the previous change');
+  }, [undoTargetId, handleRestoreCheckpoint]);
+  const handleRedo = useCallback(() => {
+    if (redoTargetId) void handleRestoreCheckpoint(redoTargetId, 'the change after');
+  }, [redoTargetId, handleRestoreCheckpoint]);
+
   const headerActions: HeaderAction[] = [
     {
       id: 'back',
@@ -1903,6 +2082,13 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     }
   ];
 
+  if (quick) {
+    headerActions.push(
+      { id: 'undo', label: 'Undo', icon: Undo2, onClick: handleUndo, variant: 'outline', disabled: !undoTargetId || generating },
+      { id: 'redo', label: 'Redo', icon: Redo2, onClick: handleRedo, variant: 'outline', disabled: !redoTargetId || generating },
+    );
+  }
+
   headerActions.push({
     id: 'save',
     label: saveInProgress ? 'Saving…' : isDirty ? 'Save' : 'Saved',
@@ -1912,7 +2098,16 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     disabled: !isDirty || saveInProgress
   });
 
-  if (initialCheckpointId) {
+  if (initialCheckpointId && quick) {
+    headerActions.push({
+      id: 'discard',
+      label: 'Discard Changes',
+      icon: RotateCcw,
+      onClick: () => handleRestoreCheckpoint(initialCheckpointId, 'Last saved state', { isDiscard: true }),
+      variant: 'outline',
+      disabled: saveInProgress || !isDirty,
+    });
+  } else if (initialCheckpointId) {
     const discardDisabled = saveInProgress || !isDirty;
     headerActions.push({
       id: 'discard',
@@ -2029,18 +2224,46 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
     </div>
   );
 
+  // Quick edit's derived state. Declared here rather than inside the branch below, so these hooks
+  // run on every render whichever surface is showing. The starters are not among them: passing
+  // `simpleThread` is what puts ChatPanel in simple mode, and it picks QUICK_EDIT_PILLS and scopes
+  // them to the previewed page itself.
+  const quickRuns = useMemo(() => (quick ? splitRuns(debugEvents) : []), [quick, debugEvents]);
+
+  const quickThread = quick ? (
+    <SimpleThread
+      runs={quickRuns}
+      generating={generating}
+      isDirty={isDirty}
+      onRestore={(id) => { void handleRestoreCheckpoint(id, 'an earlier change'); }}
+      onUndoLatest={undoTargetId ? handleUndo : null}
+      onRedoLatest={redoTargetId ? handleRedo : null}
+      onSave={() => { void handleSave(); }}
+      onAllow={(gateKey, label) => {
+        // Mirrors the transcript's Allow: the capability is persisted so the run, and later ones,
+        // proceed without asking again, and the task restarts from history.
+        track('approval_response', { via: 'quick', decision: 'allow', gate: gateKey });
+        configManager.setPermissionOverride(gateKey, 'allow');
+        void handleGenerate(`Approved ${label}. Continue the task.`);
+      }}
+      onDeny={(label) => {
+        track('approval_response', { via: 'quick', decision: 'deny' });
+        void handleGenerate(`I declined ${label}. Continue without it.`);
+      }}
+    />
+  ) : undefined;
   return (
     <TooltipProvider>
       <div className="h-[100dvh] flex flex-col">
         {/* Header */}
         <AppHeader
           leftText={project.name}
-          leftSubtext={{ chat: 'Chat', files: 'Files', editor: 'Editor', preview: 'Preview', checkpoints: 'Checkpoints', console: 'Console', skills: 'Skills', debug: 'Debug' }[activeMobilePanel]}
+          leftSubtext={quick ? undefined : { chat: 'Chat', files: 'Files', editor: 'Editor', preview: 'Preview', elements: 'Inspector', checkpoints: 'Checkpoints', console: 'Console', skills: 'Skills', debug: 'Debug' }[activeMobilePanel]}
           onLogoClick={guardedBack}
           actions={headerActions}
-          mobileMenuContent={mobileMenuContent}
-          desktopOnlyContent={desktopHeaderContent}
-          mobileVisibleActions={isDirty ? ['save'] : []}
+          mobileMenuContent={quick ? undefined : mobileMenuContent}
+          desktopOnlyContent={quick ? undefined : desktopHeaderContent}
+          mobileVisibleActions={quick || isDirty ? ['save'] : []}
         />
 
         <DeployDialog
@@ -2083,8 +2306,44 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
 
         {/* Desktop Workspace */}
         <div className="hidden md:flex flex-1 overflow-hidden bg-background">
-          {/* Left sidebar for panel toggles */}
-          <div className="w-10 bg-muted/70 border-r border-border flex flex-col items-center py-3 gap-1.5">
+          {/* Left sidebar for panel toggles. Quick edit has the same rail with only its two panels. */}
+          {quick && (
+            <div className="w-10 bg-muted/70 border-r border-border flex flex-col items-center py-3 gap-1.5">
+              {([
+                { key: 'chat', label: 'Chat', Icon: MessageSquare, on: showChat, token: 'assistant' },
+                { key: 'preview', label: 'Live Preview', Icon: Eye, on: showPreview, token: 'preview' },
+                { key: 'elements', label: 'Inspector', Icon: ListTree, on: showElements, token: 'elements' },
+              ] as const).map(({ key, label, Icon, on, token }) => (
+                <Tooltip key={key}>
+                  <TooltipTrigger asChild>
+                    <button
+                      className={`h-6 w-6 px-1 rounded-sm flex items-center justify-center transition-all ${
+                        on ? 'shadow-sm' : 'bg-transparent text-muted-foreground hover:bg-muted/80 hover:text-foreground'
+                      }`}
+                      style={{
+                        backgroundColor: on ? `var(--button-${token}-active-bg)` : undefined,
+                        color: on ? `var(--button-${token}-active-fg)` : undefined,
+                      }}
+                      onClick={() => setQuickPanels((p) => ({ ...p, [key]: !p[key] }))}
+                      aria-pressed={on}
+                      aria-label={label}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="right"
+                    className="border-0"
+                    style={{ backgroundColor: `var(--button-${token}-active)`, color: 'white' }}
+                    arrowStyle={{ backgroundColor: `var(--button-${token}-active)`, fill: `var(--button-${token}-active)` }}
+                  >
+                    <p>{label}</p>
+                  </TooltipContent>
+                </Tooltip>
+              ))}
+            </div>
+          )}
+          {!quick && <div className="w-10 bg-muted/70 border-r border-border flex flex-col items-center py-3 gap-1.5">
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
@@ -2399,8 +2658,8 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
               </TooltipContent>
             </Tooltip>
 
-          </div>
-          
+          </div>}
+
           {/* Main content area — slot-based layout (max 3 panels) */}
           <div
             ref={panelContainerRef}
@@ -2410,7 +2669,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
             onMouseUp={draggingPanel ? handlePanelDragEnd : undefined}
           >
           <PanelDragProvider value={{ onDragStart: handlePanelDragStart, draggingPanel }}>
-          <ResizablePanelGroup ref={panelGroupRef} direction="horizontal" autoSaveId="workspace-slots">
+          <ResizablePanelGroup ref={panelGroupRef} direction="horizontal" autoSaveId={quick ? 'quick-edit-slots' : 'workspace-slots'}>
             {(() => {
               // Build ordered list of visible panels using panelOrder
               const panelMap: Record<string, { minSize: number; content: React.ReactNode }> = {};
@@ -2437,7 +2696,9 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                   getModelDisplayName={getModelDisplayName}
                   isTourLockingInput={isTourLockingInput}
                   onClearChat={clearDebugEvents}
-                  onClose={() => useWorkspaceStore.getState().togglePanel('chat')}
+                  onClose={quick ? () => setQuickPanels((p) => ({ ...p, chat: false })) : () => useWorkspaceStore.getState().togglePanel('chat')}
+                  simpleThread={quickThread}
+                  solo={visiblePanelCount === 1}
                   supportsVision={supportsVision}
                   inputModalities={inputModalities}
                   providerReady={providerReady}
@@ -2447,6 +2708,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                   placedBlocks={placedBlocks}
                   onRemovePlacedBlock={handleRemovePlacedBlock}
                   onClearPlacedBlocks={handleClearPlacedBlocks}
+                onCaptureContextScreenshot={handleCaptureContextScreenshot}
                 />
               )};
 
@@ -2503,7 +2765,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                     hasFocusTarget={Boolean(focusContext)}
                     onClose={fullscreenPreview ? handleExitFullscreen : handleClosePreview}
                     deploymentId={selectedDeploymentId}
-                    onCaptureScreenshot={handleCaptureScreenshot}
+                    simple={quick}
                     entryPoint={entryPoint}
                     runtime={projectRuntime}
                     placementActive={paletteOpen}
@@ -2513,6 +2775,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                     isFullscreen={fullscreenPreview}
                     provenance
                     onTreeLevel={handleTreeLevel}
+                    onTreeLevels={handleTreeLevels}
                     onTreeStale={handleTreeStale}
                     onSelectionResolved={handleSelectionResolved}
                     onToolbarAction={handleToolbarAction}
@@ -2524,10 +2787,10 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 </div>
               )};
 
-              // Desktop only. The mobile block renders one panel at a time and has no Elements
-              // entry, which is deliberate: with the preview unmounted there would be no frame to
-              // query. Note also that both blocks pass `ref={previewRef}` — a pre-existing hazard
-              // that the tree does not exercise, since it never runs alongside the mobile preview.
+              // The mobile tree has its own Elements entry, which keeps its preview mounted
+              // alongside so there is a frame to query; see the mobile block. Note that both
+              // blocks pass `ref={previewRef}` — a pre-existing hazard, untouched here: the
+              // Inspector addresses `inspectorPreview()` rather than that ref.
               if (showElements) panelMap['elements'] = { minSize: 14, content: (
                 <PanelContainer>
                   <PanelHeader
@@ -2535,7 +2798,9 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                     title="Inspector"
                     color="var(--button-elements-active)"
                     panelKey="elements"
-                    onClose={() => useWorkspaceStore.getState().togglePanel('elements')}
+                    onClose={quick
+                      ? () => setQuickPanels((p) => ({ ...p, elements: false }))
+                      : () => useWorkspaceStore.getState().togglePanel('elements')}
                   />
                   <ElementsPanel
                     ref={elementsPanelRef}
@@ -2725,6 +2990,8 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 placedBlocks={placedBlocks}
                 onRemovePlacedBlock={handleRemovePlacedBlock}
                 onClearPlacedBlocks={handleClearPlacedBlocks}
+                onCaptureContextScreenshot={handleCaptureContextScreenshot}
+                simpleThread={quickThread}
               />
             )}
 
@@ -2752,25 +3019,74 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
               </div>
             )}
 
-            {activeMobilePanel === 'preview' && (
-              <div className="h-full overflow-hidden relative" style={{ background: `linear-gradient(0deg, rgba(var(--panel-preview-rgb), 0.01), rgba(var(--panel-preview-rgb), 0.01)), var(--card)` }}>
-                <MultipagePreview
-                  ref={previewRef}
-                  projectId={project.id}
-                  initialPath={initialPreviewPath}
-                  onPathChange={setPreviewPath}
-                  refreshTrigger={refreshTrigger}
-                  onFocusSelection={handleMobileFocusSelection}
-                  hasFocusTarget={Boolean(focusContext)}
-                  onClose={handleClosePreview}
-                  deploymentId={selectedDeploymentId}
-                  onCaptureScreenshot={handleCaptureScreenshot}
-                  entryPoint={entryPoint}
-                  runtime={projectRuntime}
-                  placementActive={paletteOpen}
-                  onPlacementToggle={handlePlacementToggle}
-                  onPlacementComplete={handlePlacementComplete}
-                />
+            {/* Preview and Inspector share this branch, and the preview element keeps one position
+                in the tree across both, so switching between them never remounts the frame or
+                costs a recompile. The Inspector needs a live frame to query, and it stays
+                *visible* rather than hidden behind it: a `display:none` iframe is not guaranteed to
+                lay out, and the styles tab reads computed values. */}
+            {(activeMobilePanel === 'preview' || activeMobilePanel === 'elements') && (
+              <div className="h-full flex flex-col overflow-hidden relative" style={{ background: `linear-gradient(0deg, rgba(var(--panel-preview-rgb), 0.01), rgba(var(--panel-preview-rgb), 0.01)), var(--card)` }}>
+                <div className={`overflow-hidden relative ${activeMobilePanel === 'elements' ? 'h-[45%] shrink-0 border-b border-border' : 'flex-1'}`}>
+                  <MultipagePreview
+                    ref={attachMobilePreview}
+                    projectId={project.id}
+                    initialPath={initialPreviewPath}
+                    onPathChange={setPreviewPath}
+                    refreshTrigger={refreshTrigger}
+                    onFocusSelection={handleMobileFocusSelection}
+                    hasFocusTarget={Boolean(focusContext)}
+                    onClose={handleClosePreview}
+                    deploymentId={selectedDeploymentId}
+                    entryPoint={entryPoint}
+                    runtime={projectRuntime}
+                    placementActive={paletteOpen}
+                    onPlacementToggle={handlePlacementToggle}
+                    onPlacementComplete={handlePlacementComplete}
+                    simple={quick}
+                    provenance={activeMobilePanel === 'elements'}
+                    onTreeLevel={handleTreeLevel}
+                    onTreeLevels={handleTreeLevels}
+                    onTreeStale={handleTreeStale}
+                    onSelectionResolved={handleSelectionResolved}
+                    onFrameReady={handleFrameReady}
+                    onStyleComputed={handleStyleComputed}
+                    onStyleProbeResult={handleStyleProbeResult}
+                    onToolbarAction={handleToolbarAction}
+                  />
+                </div>
+                {activeMobilePanel === 'elements' && (
+                  // flex-col, not just flex-1: the panel's root is `flex-1 min-h-0 flex flex-col`
+                  // and only sizes itself inside a flex column. In a plain block it grew to fit its
+                  // content, so neither tab's overflow-auto pane ever had a bounded height and
+                  // neither scrolled. This mirrors PanelContainer, which is what wraps it on desktop.
+                  <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                    <ElementsPanel
+                      ref={mobileElementsPanelRef}
+                      projectId={project.id}
+                      runtime={projectRuntime || 'handlebars'}
+                      previewOpen
+                      onOpenPreview={handleOpenPreviewPanel}
+                      sendToFrame={sendToPreviewFrame}
+                      selection={focusContext}
+                      applyStyle={applyStyle}
+                      removeStyle={removeStyle}
+                      onReadOverrides={readOverrides}
+                      colorTokens={colorTokens}
+                      onReadText={handleReadText}
+                      onApplyText={handleApplyText}
+                      onReplaceImage={handleOpenImagePicker}
+                      imageUrl={selectedImageUrl}
+                      onOpenFile={handleOpenStyleFile}
+                      onAskAgent={handleStyleAskAgent}
+                      onRefreshPreview={handleRefreshPreviewForStyles}
+                      onSelectElement={handleArmFocusTool}
+                      onSelectElementHover={handleSelectElementHover}
+                      focusToolArmed={focusToolArmed}
+                      activeTab={elementsTab}
+                      onTabChange={setElementsTab}
+                    />
+                  </div>
+                )}
               </div>
             )}
 
@@ -2829,7 +3145,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 <MessageSquare className="h-4 w-4" />
               </button>
 
-              <button
+              {!quick && <button
                 className={`flex items-center justify-center py-2 px-2 rounded-lg transition-all shadow-sm ${
                   activeMobilePanel === 'files'
                     ? 'text-white'
@@ -2841,9 +3157,9 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 onClick={() => { useWorkspaceStore.getState().setActiveMobilePanel('files'); }}
               >
                 <FolderTree className="h-4 w-4" />
-              </button>
+              </button>}
 
-              <button
+              {!quick && <button
                 className={`flex items-center justify-center py-2 px-2 rounded-lg transition-all shadow-sm ${
                   activeMobilePanel === 'editor'
                     ? 'text-white'
@@ -2855,7 +3171,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 onClick={() => { useWorkspaceStore.getState().setActiveMobilePanel('editor'); }}
               >
                 <Code2 className="h-4 w-4" />
-              </button>
+              </button>}
 
               <button
                 className={`flex items-center justify-center py-2 px-2 rounded-lg transition-all shadow-sm ${
@@ -2871,7 +3187,24 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 <Eye className="h-4 w-4" />
               </button>
 
-              {/* Overflow menu */}
+              <button
+                className={`flex items-center justify-center py-2 px-2 rounded-lg transition-all shadow-sm ${
+                  activeMobilePanel === 'elements'
+                    ? 'text-white'
+                    : 'bg-transparent text-muted-foreground hover:bg-muted/80 hover:text-foreground'
+                }`}
+                style={{
+                  backgroundColor: activeMobilePanel === 'elements' ? 'var(--button-elements-active)' : undefined,
+                }}
+                onClick={() => { useWorkspaceStore.getState().setActiveMobilePanel('elements'); }}
+                aria-label="Inspector"
+              >
+                <ListTree className="h-4 w-4" />
+              </button>
+
+              {/* Overflow menu. Quick edit has nothing in it: checkpoints, console, skills and
+                  debug are all outside what it offers. */}
+              {!quick && 
               <div className="relative">
                 <button
                   className={`relative flex items-center justify-center py-2 px-2 rounded-lg transition-all shadow-sm ${
@@ -2945,7 +3278,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                     </div>
                   </>
                 )}
-              </div>
+              </div>}
             </div>
           </div>
         </div>

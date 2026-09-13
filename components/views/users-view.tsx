@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { getLoginUrl } from '@/lib/config/storage';
-import { Users, Plus, Search, MoreHorizontal, UserCheck, UserX, Trash2, Pencil, ChevronRight, ChevronDown, HardDrive, Eye, EyeOff } from 'lucide-react';
+import { Users, Plus, Search, MoreHorizontal, UserCheck, UserX, Trash2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
 import {
@@ -32,6 +33,10 @@ import {
 import { toast } from 'sonner';
 import { logger } from '@/lib/utils';
 import { PageShell, PageHeader, PageBody } from '@/components/ui/page-shell';
+import { WorkspaceMembers } from './workspace-members';
+import { emitViewChanged } from '@/lib/view-mode-event';
+import { Section, SectionBody, SectionHeader } from '@/components/ui/section';
+import { SettingRow } from '@/components/ui/setting-row';
 
 interface WorkspaceInfo {
   id: string;
@@ -51,6 +56,7 @@ interface UserInfo {
   displayName: string | null;
   isAdmin: boolean;
   active: boolean;
+  studioView: boolean;
   workspaces: WorkspaceInfo[];
   projectCount: number;
   storageMb: number;
@@ -60,7 +66,21 @@ interface UserInfo {
 }
 
 
-export function UsersView() {
+export function UsersView({
+  workspaceId,
+  embedded = false,
+}: {
+  workspaceId?: string;
+  /**
+   * Rendered inside the settings pane, which supplies the page title and the scrolling body.
+   * Without this the pane shows two headings and two scroll containers, one inside the other.
+   */
+  embedded?: boolean;
+} = {}) {
+  // Two tiers on one page, the way the mail settings do it. An owner opening this from their
+  // workspace gets the members section; only an instance admin additionally gets every account on
+  // the instance, which is what /admin/users has always shown.
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -74,6 +94,7 @@ export function UsersView() {
     displayName: '',
     isAdmin: false,
     active: true,
+    studioView: true,
     password: '',
   });
   const [showEditPassword, setShowEditPassword] = useState(false);
@@ -95,15 +116,22 @@ export function UsersView() {
   const [grantRole, setGrantRole] = useState<'owner' | 'editor' | 'viewer'>('editor');
   const [grantingAccess, setGrantingAccess] = useState(false);
 
-  // Expandable workspace detail state
-  const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
 
   const isServerMode = process.env.NEXT_PUBLIC_SERVER_MODE === 'true';
   const externalIdentity = !!process.env.NEXT_PUBLIC_GATEWAY_URL;
 
   useEffect(() => {
-    loadUsers();
+    fetch('/api/auth/me')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => setIsAdmin(data?.user?.isAdmin === true))
+      .catch(() => setIsAdmin(false));
   }, []);
+
+  useEffect(() => {
+    // The instance list is admin-only, so asking for it as an owner would just be a 403.
+    if (isAdmin === true) loadUsers();
+    else if (isAdmin === false) setLoading(false);
+  }, [isAdmin]);
 
   useEffect(() => {
     if (showCreateDialog || showEditDialog) {
@@ -143,6 +171,7 @@ export function UsersView() {
       displayName: user.displayName || '',
       isAdmin: user.isAdmin,
       active: user.active,
+      studioView: user.studioView,
       password: '',
     });
     setShowEditPassword(false);
@@ -162,6 +191,7 @@ export function UsersView() {
       const body: Record<string, unknown> = {
         displayName: editForm.displayName || undefined,
         active: editForm.active,
+        studioView: editForm.studioView,
       };
       if (editForm.isAdmin !== editUser.isAdmin) {
         body.isAdmin = editForm.isAdmin;
@@ -179,6 +209,7 @@ export function UsersView() {
         throw new Error(error.error || 'Failed to update user');
       }
       toast.success('User updated');
+      emitViewChanged();
       setShowEditDialog(false);
       setEditUser(null);
       await loadUsers();
@@ -338,10 +369,6 @@ export function UsersView() {
     }
   };
 
-  const handleToggleExpand = (userId: string) => {
-    setExpandedUserId(expandedUserId === userId ? null : userId);
-  };
-
   const filteredUsers = useMemo(() => {
     if (!searchQuery) return users;
     const query = searchQuery.toLowerCase();
@@ -364,14 +391,6 @@ export function UsersView() {
     }
   };
 
-  const roleBadgeVariant = (role: string): 'default' | 'secondary' | 'destructive' | 'outline' => {
-    switch (role) {
-      case 'owner': return 'default';
-      case 'editor': return 'secondary';
-      default: return 'outline';
-    }
-  };
-
   // Workspaces the edit user does NOT already have access to
   const grantableWorkspaces = useMemo(() => {
     if (!editUser) return [];
@@ -389,7 +408,7 @@ export function UsersView() {
     );
   }
 
-  if (loading) {
+  if (isAdmin === null || (isAdmin && loading)) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-center">
@@ -400,10 +419,24 @@ export function UsersView() {
     );
   }
 
-  return (
-    <>
+  // A workspace owner who is not an instance admin: members only, and no instance-wide controls.
+  if (!isAdmin) {
+    const members = workspaceId ? (
+      <WorkspaceMembers workspaceId={workspaceId} />
+    ) : (
+      <p className="text-sm text-muted-foreground">Open a workspace to manage its members.</p>
+    );
+
+    return embedded ? members : (
       <PageShell>
-        <PageHeader title="Users">
+        <PageHeader title="Users" />
+        <PageBody maxWidth="max-w-4xl">{members}</PageBody>
+      </PageShell>
+    );
+  }
+
+  const toolbar = (
+    <>
           {!externalIdentity && (
             <div className="flex items-center shrink-0">
               <Button onClick={() => setShowCreateDialog(true)} size="sm" className="gap-2">
@@ -431,10 +464,17 @@ export function UsersView() {
               </p>
             </div>
           )}
-        </PageHeader>
+    </>
+  );
 
-        {/* User List */}
-        <PageBody fill>
+  const body = (
+    <>
+            {workspaceId && (
+              // Inside the body so it shares its gutters and max width; the table below still fills.
+              <div className="shrink-0 mb-4">
+                <WorkspaceMembers workspaceId={workspaceId} onMembershipChange={loadUsers} />
+              </div>
+            )}
             {filteredUsers.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Users className="h-16 w-16 text-muted-foreground mb-4" />
@@ -459,7 +499,6 @@ export function UsersView() {
                 <table className="w-full table-auto border-collapse">
                   <thead className="sticky top-0 z-10">
                     <tr>
-                      <th className="bg-muted p-[6px_10px] border-b select-none"></th>
                       <th className="bg-muted text-[11px] font-medium text-muted-foreground text-left p-[6px_10px] border-b whitespace-nowrap select-none w-full">User</th>
                       <th className="@max-5xl:hidden bg-muted text-[11px] font-medium text-muted-foreground text-left p-[6px_10px] border-b whitespace-nowrap select-none">Projects</th>
                       <th className="@max-5xl:hidden bg-muted text-[11px] font-medium text-muted-foreground text-left p-[6px_10px] border-b whitespace-nowrap select-none">Storage</th>
@@ -469,17 +508,12 @@ export function UsersView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredUsers.map((user) => {
-                      const isExpanded = expandedUserId === user.id;
-                      return (
-                        <React.Fragment key={user.id}>
+                    {filteredUsers.map((user) => (
                           <tr
+                            key={user.id}
                             className="border-b border-border/50 hover:bg-muted/50 cursor-pointer h-[44px]"
-                            onClick={() => handleToggleExpand(user.id)}
+                            onClick={() => handleOpenEdit(user)}
                           >
-                            <td className="p-[4px_10px] align-middle text-muted-foreground">
-                              {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                            </td>
                             <td className="w-full p-[4px_10px] text-[13px] align-middle overflow-hidden" style={{ maxWidth: 0 }}>
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2 min-w-0">
@@ -530,110 +564,110 @@ export function UsersView() {
                               </DropdownMenu>
                             </td>
                           </tr>
-                          {isExpanded && (
-                            <tr className="bg-muted/30 border-b border-border/50">
-                              <td></td>
-                              <td colSpan={6} className="p-[4px_10px] pb-4 align-top">
-                                {/* The stats the row drops at narrow widths. Shown only there, so the
-                                    expanded panel does not repeat columns that are already on screen,
-                                    and the figures stay reachable rather than disappearing with the
-                                    columns. */}
-                                <div className="@5xl:hidden mb-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-muted-foreground">
-                                  <span>Projects <span className="text-foreground tabular-nums">{user.projectCount}</span></span>
-                                  <span>Storage <span className="text-foreground tabular-nums">{user.storageMb} MB</span></span>
-                                  <span>Workspaces <span className="text-foreground tabular-nums">{user.workspaces.length}</span></span>
-                                  <span>Active <span className="text-foreground">{user.lastActive ? formatDate(user.lastActive) : formatDate(user.createdAt)}</span></span>
-                                </div>
-                                {user.workspaces.length > 0 ? (
-                                  <div className="space-y-2">
-                                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
-                                      Workspaces ({user.workspaces.length})
-                                    </div>
-                                    {user.workspaces.map((ws) => (
-                                      <div
-                                        key={ws.id}
-                                        className="flex items-center gap-3 text-sm p-2 rounded bg-background/60"
-                                      >
-                                        <HardDrive className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                                          <span className="font-medium truncate">{ws.name}</span>
-                                          <Badge variant={roleBadgeVariant(ws.role)} className="text-[10px] shrink-0">{ws.role}</Badge>
-                                        </div>
-                                        <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
-                                          <span>{ws.max_projects} projects</span>
-                                          <span>{ws.max_deployments} deployments</span>
-                                          <span>Created {formatDate(ws.created_at)}</span>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <div className="text-sm text-muted-foreground py-2">
-                                    No workspaces assigned
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
+                    ))}
                   </tbody>
                 </table>
               </div>
             )}
-        </PageBody>
-      </PageShell>
+    </>
+  );
+
+  // Embedded in the settings pane, which already supplies the title and the scrolling body. Two
+  // shells nested would mean two headings and two scroll containers.
+  const page = embedded ? (
+    <div className="flex flex-col gap-4 h-full min-h-0">
+      <div className="flex items-center gap-3 shrink-0">{toolbar}</div>
+      <div className="flex-1 min-h-0 flex flex-col">{body}</div>
+    </div>
+  ) : (
+    <PageShell>
+      <PageHeader title="Users">{toolbar}</PageHeader>
+      <PageBody fill>{body}</PageBody>
+    </PageShell>
+  );
+
+  return (
+    <>
+      {page}
 
       {/* Edit User Dialog */}
       <Dialog open={showEditDialog} onOpenChange={(open) => { setShowEditDialog(open); if (!open) setEditUser(null); }}>
         <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Edit User</DialogTitle>
+            <DialogTitle>Edit user</DialogTitle>
+            <DialogDescription>{editUser?.email}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-5 py-4">
-            {/* Email (read-only) */}
-            <div className="space-y-2">
-              <Label className="text-muted-foreground">Email</Label>
-              <div className="text-sm font-medium">{editUser?.email}</div>
-            </div>
 
-            {/* Display Name */}
-            <div className="space-y-2">
-              <Label htmlFor="edit-displayName">Display Name</Label>
-              <Input
-                id="edit-displayName"
-                value={editForm.displayName}
-                onChange={(e) => setEditForm(f => ({ ...f, displayName: e.target.value }))}
-                placeholder="Display name"
-              />
+          {/* The table hides these columns on a narrow window, so this is where they stay reachable. */}
+          {editUser && (
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-muted-foreground -mt-1">
+              <span>Projects <span className="text-foreground tabular-nums">{editUser.projectCount}</span></span>
+              <span>Storage <span className="text-foreground tabular-nums">{editUser.storageMb} MB</span></span>
+              <span>
+                Active{' '}
+                <span className="text-foreground">
+                  {editUser.lastActive ? formatDate(editUser.lastActive) : formatDate(editUser.createdAt)}
+                </span>
+              </span>
             </div>
+          )}
 
-            {/* Admin + Active toggles */}
-            <div className="flex items-center gap-6">
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="edit-admin"
-                  checked={editForm.isAdmin}
-                  onCheckedChange={(checked) => setEditForm(f => ({ ...f, isAdmin: checked }))}
-                />
-                <Label htmlFor="edit-admin">Admin</Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="edit-active"
-                  checked={editForm.active}
-                  onCheckedChange={(checked) => setEditForm(f => ({ ...f, active: checked }))}
-                />
-                <Label htmlFor="edit-active">Active</Label>
-              </div>
-            </div>
+          <div className="space-y-4 py-2">
+            <Section>
+              <SectionHeader title="Account" />
+              <SectionBody className="py-0">
+                <SettingRow title="Display name">
+                  <Input
+                    id="edit-displayName"
+                    value={editForm.displayName}
+                    onChange={(e) => setEditForm(f => ({ ...f, displayName: e.target.value }))}
+                    placeholder="Optional"
+                    className="w-[220px]"
+                  />
+                </SettingRow>
 
-            {/* Password Reset */}
+                <SettingRow
+                  title="Opens in"
+                  description="The studio is the full editor. The simple view is projects and deployments only."
+                >
+                  <Select
+                    value={editForm.studioView ? 'studio' : 'simple'}
+                    onValueChange={(v) => setEditForm(f => ({ ...f, studioView: v === 'studio' }))}
+                  >
+                    <SelectTrigger size="sm" className="w-[120px]" aria-label="Opens in">
+                      <span className="text-xs">{editForm.studioView ? 'Studio' : 'Simple view'}</span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="studio">Studio</SelectItem>
+                      <SelectItem value="simple">Simple view</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </SettingRow>
+
+                <SettingRow
+                  title="Instance admin"
+                  description="Administers every workspace and every account on this instance."
+                >
+                  <Switch
+                    id="edit-admin"
+                    checked={editForm.isAdmin}
+                    onCheckedChange={(checked) => setEditForm(f => ({ ...f, isAdmin: checked }))}
+                  />
+                </SettingRow>
+
+                <SettingRow title="Active" description="An inactive account cannot sign in.">
+                  <Switch
+                    id="edit-active"
+                    checked={editForm.active}
+                    onCheckedChange={(checked) => setEditForm(f => ({ ...f, active: checked }))}
+                  />
+                </SettingRow>
+              </SectionBody>
+            </Section>
+
             {!externalIdentity && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="edit-password">Reset Password</Label>
+              <Section>
+                <SectionHeader title="Password">
                   <button
                     type="button"
                     className="text-xs text-primary hover:text-primary/80 transition-colors"
@@ -648,108 +682,107 @@ export function UsersView() {
                   >
                     Generate
                   </button>
-                </div>
-                <div className="relative">
-                  <Input
-                    id="edit-password"
-                    type={showEditPassword ? 'text' : 'password'}
-                    value={editForm.password}
-                    onChange={(e) => setEditForm(f => ({ ...f, password: e.target.value }))}
-                    placeholder="Leave blank to keep current"
-                    className="pr-9"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowEditPassword(!showEditPassword)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    {showEditPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
-                </div>
-                {editForm.password && editForm.password.length > 0 && editForm.password.length < 8 && (
-                  <p className="text-xs text-destructive">Minimum 8 characters</p>
-                )}
-              </div>
+                </SectionHeader>
+                <SectionBody>
+                  <div className="relative">
+                    <Input
+                      id="edit-password"
+                      type={showEditPassword ? 'text' : 'password'}
+                      value={editForm.password}
+                      onChange={(e) => setEditForm(f => ({ ...f, password: e.target.value }))}
+                      placeholder="Leave blank to keep the current one"
+                      className="pr-9"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowEditPassword(!showEditPassword)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      {showEditPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                  {editForm.password && editForm.password.length > 0 && editForm.password.length < 8 && (
+                    <p className="text-xs text-destructive mt-1.5">Minimum 8 characters</p>
+                  )}
+                </SectionBody>
+              </Section>
             )}
 
-            {/* Workspace Memberships */}
-            <div className="space-y-3">
-              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                Workspaces ({editUser?.workspaces.length ?? 0})
-              </div>
-              {editUser && editUser.workspaces.length > 0 ? (
-                <div className="space-y-1.5">
-                  {editUser.workspaces.map((ws) => (
-                    <div
-                      key={ws.id}
-                      className="flex items-center gap-2 text-sm p-2 rounded bg-muted/50"
-                    >
-                      <span className="flex-1 min-w-0 truncate font-medium">{ws.name}</span>
-                      <Select
-                        value={ws.role}
-                        onValueChange={(value) => handleChangeRole(ws.id, value)}
-                      >
-                        <SelectTrigger className="w-24 h-7 text-xs">
-                          <SelectValue />
+            <Section>
+              <SectionHeader title={`Workspaces (${editUser?.workspaces.length ?? 0})`}>
+                {/* These apply as they are changed, unlike the fields above, so the header says so. */}
+                <span className="text-[11px] text-muted-foreground">Applied immediately</span>
+              </SectionHeader>
+              <SectionBody className="space-y-2">
+                {editUser && editUser.workspaces.length > 0 ? (
+                  editUser.workspaces.map((ws) => (
+                    <div key={ws.id} className="flex items-center gap-2 text-sm">
+                      <div className="flex-1 min-w-0">
+                        <span className="block truncate">{ws.name}</span>
+                        <span className="block text-[11px] text-muted-foreground truncate">
+                          {ws.max_projects} projects · {ws.max_deployments} deployments · created {formatDate(ws.created_at)}
+                        </span>
+                      </div>
+                      <Select value={ws.role} onValueChange={(value) => handleChangeRole(ws.id, value)}>
+                        <SelectTrigger size="sm" className="w-[92px]" aria-label={`Role in ${ws.name}`}>
+                          <span className="text-xs capitalize">{ws.role}</span>
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="viewer">viewer</SelectItem>
-                          <SelectItem value="editor">editor</SelectItem>
-                          <SelectItem value="owner">owner</SelectItem>
+                          <SelectItem value="editor">Editor</SelectItem>
+                          <SelectItem value="owner">Owner</SelectItem>
                         </SelectContent>
                       </Select>
                       <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                        variant="ghost" size="sm" className="px-2 text-muted-foreground hover:text-destructive"
                         onClick={() => handleRevokeAccess(ws.id)}
-                        title="Revoke access"
+                        aria-label={`Remove from ${ws.name}`}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-sm text-muted-foreground">No workspaces assigned</div>
-              )}
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">Not in any workspace.</p>
+                )}
 
-              {/* Grant access to another workspace */}
-              {grantableWorkspaces.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Select value={grantWorkspaceId} onValueChange={setGrantWorkspaceId}>
-                    <SelectTrigger className="flex-1 h-8 text-xs">
-                      <SelectValue placeholder="Add to workspace..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {grantableWorkspaces.map(ws => (
-                        <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select value={grantRole} onValueChange={(v) => setGrantRole(v as 'owner' | 'editor' | 'viewer')}>
-                    <SelectTrigger className="w-24 h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="viewer">viewer</SelectItem>
-                      <SelectItem value="editor">editor</SelectItem>
-                      <SelectItem value="owner">owner</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs shrink-0"
-                    disabled={!grantWorkspaceId || grantingAccess}
-                    onClick={handleGrantAccess}
-                  >
-                    {grantingAccess ? '...' : 'Grant'}
-                  </Button>
-                </div>
-              )}
-            </div>
+                {grantableWorkspaces.length > 0 && (
+                  <div className="flex items-center gap-2 border-t border-border pt-2">
+                    <Select value={grantWorkspaceId} onValueChange={setGrantWorkspaceId}>
+                      <SelectTrigger size="sm" className="flex-1 min-w-0" aria-label="Add to workspace">
+                        <span className="text-xs truncate">
+                          {grantableWorkspaces.find(w => w.id === grantWorkspaceId)?.name ?? (
+                            <span className="text-muted-foreground">Add to workspace…</span>
+                          )}
+                        </span>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {grantableWorkspaces.map(ws => (
+                          <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select value={grantRole} onValueChange={(v) => setGrantRole(v as 'owner' | 'editor' | 'viewer')}>
+                      <SelectTrigger size="sm" className="w-[92px]" aria-label="Role to grant">
+                        <span className="text-xs capitalize">{grantRole}</span>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="editor">Editor</SelectItem>
+                        <SelectItem value="owner">Owner</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      size="sm" variant="outline" className="shrink-0"
+                      disabled={!grantWorkspaceId || grantingAccess}
+                      onClick={handleGrantAccess}
+                    >
+                      {grantingAccess ? '…' : 'Add'}
+                    </Button>
+                  </div>
+                )}
+              </SectionBody>
+            </Section>
           </div>
+
           <DialogFooter>
             <Button variant="outline" onClick={() => { setShowEditDialog(false); setEditUser(null); }}>Cancel</Button>
             <Button onClick={handleSaveEdit} disabled={saving}>

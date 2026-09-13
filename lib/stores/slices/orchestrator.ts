@@ -9,6 +9,7 @@ import { track } from '@/lib/telemetry';
 import { vfs } from '@/lib/vfs';
 import type { Project, ProjectRuntime } from '@/lib/vfs/types';
 import type { WorkspaceMode } from './project';
+import { normalizeProjectSettings } from '@/lib/vfs/project-settings';
 import { debugEventsState } from '@/lib/llm/debug-events-state';
 import { drainRuntimeErrors } from '@/lib/preview/runtime-errors';
 import { logger } from '@/lib/utils';
@@ -75,7 +76,8 @@ async function pullAndCheckpointServerFiles(
   }
   target.name = serverProject.name;
   target.description = serverProject.description;
-  if (serverProject.settings) target.settings = serverProject.settings;
+  // Straight from a JSON response; normalized for the same reason the pull path does it.
+  if (serverProject.settings) target.settings = normalizeProjectSettings(serverProject.settings);
   target.updatedAt = serverUpdatedAt;
   target.lastSyncedAt = new Date();
   target.serverUpdatedAt = serverUpdatedAt;
@@ -180,11 +182,22 @@ export interface OrchestratorSlice {
   getGenerationEvents: (projectId?: string) => DebugEvent[];
 
   // Generation lifecycle
-  startGeneration: (message: string, images?: PendingImage[], options?: StartGenerationOptions) => Promise<void>;
+  /**
+   * Start a run for a project.
+   *
+   * Resolves `false` when nothing was started — the project already had a task, no model or key is
+   * configured, the prompt was empty, the tour holds the input. Callers need that: the post-send
+   * cleanup (spending the selection's inclusion, dropping attachments and placed blocks) must not
+   * run for a request that was never sent.
+   *
+   * In browser mode it resolves when the run *finishes*, which is what makes that cleanup
+   * post-generation. In server mode it resolves once the task is accepted.
+   */
+  startGeneration: (message: string, images?: PendingImage[], options?: StartGenerationOptions) => Promise<boolean>;
   stopGeneration: (projectId?: string) => void | Promise<void>;
   connectSSE: () => void;
   disconnectSSE: () => void;
-  startServerGeneration: (projectId: string, prompt: string, chatMode: boolean, images?: PendingImage[], options?: StartGenerationOptions) => Promise<void>;
+  startServerGeneration: (projectId: string, prompt: string, chatMode: boolean, images?: PendingImage[], options?: StartGenerationOptions) => Promise<boolean>;
   continueGeneration: () => void;
   resetOrchestrator: () => void;
 
@@ -207,6 +220,13 @@ export interface OrchestratorSlice {
   resolveApproval: (outcome: ApprovalOutcome) => void;
   clearPendingApprovals: () => void;
 }
+
+/**
+ * Shown when a start is refused because the project already has a task. Exported because the UI
+ * paths that turn a gesture down for the same reason (a restore, a retry, starting an interview)
+ * have to say the same thing.
+ */
+export const PROJECT_BUSY_NOTICE = 'Still working on the last change. Wait for it to finish, or stop it first.';
 
 type CombinedState = OrchestratorSlice & {
   projectId: string;
@@ -440,16 +460,22 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
   },
 
   startGeneration: async (message: string, images?: PendingImage[], options?: StartGenerationOptions) => {
-    if (options?.isTourLockingInput) return;
+    if (options?.isTourLockingInput) return false;
 
     const projectId = options?.projectId || '';
+
+    // One task per project. Tasks are stored by project id, so a second start would take the slot
+    // and leave the first running where Stop can no longer reach it; on the server that orphan then
+    // finishes and lands changes the client sees as another device's. The guard has to sit ahead of
+    // both paths.
+    if (get().isProjectGenerating(projectId)) {
+      toast.info(PROJECT_BUSY_NOTICE);
+      return false;
+    }
 
     if (isServerMode()) {
       return get().startServerGeneration(projectId, message.trim(), !!options?.chatMode, images, options);
     }
-
-    // Guard on per-project generation, not global
-    if (get().isProjectGenerating(projectId)) return;
 
     drainRuntimeErrors();
 
@@ -457,7 +483,7 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
     const hasAttachments = !!(images?.length || options?.audio?.length || options?.files?.length);
     if (!trimmedPrompt && !hasAttachments) {
       toast.error('Please enter a prompt');
-      return;
+      return false;
     }
 
     const chatMode = options?.chatMode ?? false;
@@ -504,7 +530,7 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
       set({ generationTasks: cancelTasks, ...deriveScalarFields(cancelTasks, get().projectId) });
       logger.error('[Orchestrator] Failed to resolve project model assignment:', err);
       toast.error('Could not resolve this project\'s model configuration. Check your provider settings.');
-      return;
+      return false;
     }
     const currentProvider = assignment.agent.provider;
     const providerConfig = getProvider(currentProvider);
@@ -516,7 +542,7 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
       cancelTasks.delete(projectId);
       set({ generationTasks: cancelTasks, ...deriveScalarFields(cancelTasks, get().projectId) });
       toast.error(`Please set your ${providerConfig.name} API key in settings`);
-      return;
+      return false;
     }
 
     if (providerConfig.isLocal) {
@@ -525,7 +551,7 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
         cancelTasks.delete(projectId);
         set({ generationTasks: cancelTasks, ...deriveScalarFields(cancelTasks, get().projectId) });
         toast.error(`No model selected for ${providerConfig.name}. Please select a model in settings.`);
-        return;
+        return false;
       }
     }
 
@@ -536,7 +562,7 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
       cancelTasks.delete(projectId);
       set({ generationTasks: cancelTasks, ...deriveScalarFields(cancelTasks, get().projectId) });
       toast.error(`No model selected. Please select a model in settings.`);
-      return;
+      return false;
     }
 
     // Backfill model into the task now that we have it
@@ -758,6 +784,10 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
         globalThis.dispatchEvent(new CustomEvent('generationStateChanged', { detail: { generating: false, projectId } }));
       }
     }
+
+    // Reached only by a run that started. Whether it then succeeded, failed or was stopped is the
+    // task's `result`, which the caller reads separately; this says the request was accepted.
+    return true;
   },
 
   stopGeneration: async (projectId?: string) => {
@@ -768,13 +798,22 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
     get().clearPendingApprovals();
 
     if (task?.serverTaskId) {
-      // Soft stop: abort the current inference but let the server emit task_complete
-      await fetch('/api/server-generate/cancel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId: task.serverTaskId }),
-      });
-      return;
+      // Soft stop: abort the current inference and let the server emit task_complete. When the
+      // server says there is no live loop to stop, no such event is coming, and waiting for it
+      // would leave the task marked as running for good; that case is closed locally below.
+      let serverWillComplete = false;
+      try {
+        const response = await fetch('/api/server-generate/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskId: task.serverTaskId }),
+        });
+        const body = response.ok ? await response.json().catch(() => ({})) : {};
+        serverWillComplete = response.ok && body.hadOrchestrator === true;
+      } catch {
+        serverWillComplete = false;
+      }
+      if (serverWillComplete) return;
     }
 
     if (task?.orchestratorInstance) {
@@ -1047,6 +1086,43 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
   },
 
   startServerGeneration: async (projectId: string, prompt: string, chatMode: boolean, images?: PendingImage[], options?: StartGenerationOptions) => {
+    const projectName = get().projectName || 'Untitled';
+
+    /**
+     * Claim the project before the first `await`, exactly as the browser path does.
+     *
+     * `isProjectGenerating` reads this map, so the one-task-per-project guard in `startGeneration`
+     * only holds once the task is in it — and a model resolve, a project delta sync, a checkpoint
+     * write and the POST all stand between the press and that point. The claim also flips
+     * `generating`, which is what disables the composer while they run.
+     *
+     * The body of an async function runs synchronously up to its first `await`, so setting it here
+     * closes the guard in the same tick the press opens it.
+     */
+    const claim = new Map(get().generationTasks);
+    claim.set(projectId, {
+      projectId,
+      projectName,
+      prompt: prompt.trim(),
+      // Filled in once the assignment resolves, like the browser path's.
+      model: '',
+      startedAt: Date.now(),
+      result: null,
+      paused: false,
+      pausedMessage: null,
+      orchestratorInstance: null,
+      persistedInstance: null,
+    });
+    set({ generationTasks: claim, ...deriveScalarFields(claim, get().projectId) });
+
+    /** Give the claim back. Every exit before the task is running has to call this, or the project
+     *  stays "generating" with nothing running and no way to stop it. */
+    const abandonClaim = () => {
+      const next = new Map(get().generationTasks);
+      next.delete(projectId);
+      set({ generationTasks: next, ...deriveScalarFields(next, get().projectId) });
+    };
+
     // Resolve the agent model from the global active template, mirroring
     // the browser-mode path.
     let assignment;
@@ -1055,25 +1131,45 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
     } catch (err) {
       logger.error('[ServerGen] Failed to resolve project model assignment:', err);
       toast.error('Could not resolve this project\'s model configuration. Check your provider settings.');
-      return;
+      abandonClaim();
+      return false;
     }
     const provider = assignment.agent.provider;
     const providerConfig = getProvider(provider);
     const apiKey = configManager.getProviderApiKey(provider);
     const model = assignment.agent.model;
-    const projectName = get().projectName || 'Untitled';
 
     if (!model) {
       toast.error(`No model selected for ${providerConfig.name}. Please select a model in settings.`);
-      return;
+      abandonClaim();
+      return false;
     }
 
     // Server-mode generation always requires an API key in the request body
     // (the backend has no server-side auth resolution for the user's provider).
     if (!apiKey) {
       toast.error(`Please set your ${providerConfig.name} API key in settings`);
-      return;
+      abandonClaim();
+      return false;
     }
+
+    // The message goes up before the slow work, not after it: everything above this point is
+    // local and fast (a config read), while the sync and the checkpoint write below are neither.
+    // `conversationHistory` is built from the events further down, so it still includes this one.
+    // Build ui_metadata for the local user message (mirrors what the orchestrator produces)
+    const displayPrompt = options?.displayPrompt ?? prompt;
+    const uiMeta: Record<string, any> = { displayContent: displayPrompt };
+    if (options?.focusContext) uiMeta.focusContext = { domPath: options.focusContext.domPath, snippet: options.focusContext.outerHTML };
+    if (options?.placedBlocks?.length) uiMeta.semanticBlocks = options.placedBlocks.map((b: any) => ({ name: b.name, domPath: b.domPath, position: b.position, description: b.description }));
+
+    get().addDebugEvent('conversation_message', {
+      message: {
+        role: 'user',
+        content: prompt,
+        ui_metadata: uiMeta,
+      },
+    }, projectId);
+    get().addDebugEvent('waiting', {}, projectId);
 
     // A saved project is normally already pushed by the debounced auto-sync. Flush
     // that pending push first, then avoid serializing the entire VFS when its sync
@@ -1119,21 +1215,6 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
 
     // Connect SSE before starting generation to avoid missing early events
     get().connectSSE();
-
-    // Build ui_metadata for the local user message (mirrors what the orchestrator produces)
-    const displayPrompt = options?.displayPrompt ?? prompt;
-    const uiMeta: Record<string, any> = { displayContent: displayPrompt };
-    if (options?.focusContext) uiMeta.focusContext = { domPath: options.focusContext.domPath, snippet: options.focusContext.outerHTML };
-    if (options?.placedBlocks?.length) uiMeta.semanticBlocks = options.placedBlocks.map((b: any) => ({ name: b.name, domPath: b.domPath, position: b.position, description: b.description }));
-
-    get().addDebugEvent('conversation_message', {
-      message: {
-        role: 'user',
-        content: prompt,
-        ui_metadata: uiMeta,
-      },
-    }, projectId);
-    get().addDebugEvent('waiting', {}, projectId);
 
     const conversationHistory = get().debugEvents
       .filter((e) => e.event === 'conversation_message')
@@ -1199,30 +1280,39 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         toast.error((error as any).error || 'Failed to start server generation');
-        return;
+        abandonClaim();
+        return false;
       }
 
       ({ taskId } = await response.json());
     } catch {
       toast.error('Failed to connect to server for generation');
-      return;
+      abandonClaim();
+      return false;
     }
 
+    // Merged onto the claim rather than replacing it. The claim exists for the whole of the work
+    // above, so an SSE event (a pause, a result) can have reached the task already; a fresh object
+    // here would put `paused` and `result` back to their defaults and lose it.
     const tasks = new Map(get().generationTasks);
+    const claimed = tasks.get(projectId);
     tasks.set(projectId, {
-      projectId,
-      projectName,
+      ...(claimed ?? {
+        projectId,
+        projectName,
+        startedAt: Date.now(),
+        result: null,
+        paused: false,
+        pausedMessage: null,
+        orchestratorInstance: null,
+        persistedInstance: null,
+      }),
       prompt,
       model,
-      startedAt: Date.now(),
-      result: null,
-      paused: false,
-      pausedMessage: null,
-      orchestratorInstance: null,
-      persistedInstance: null,
       serverTaskId: taskId,
     });
     set({ generationTasks: tasks, ...deriveScalarFields(tasks, get().projectId) });
+    return true;
   },
 
   dismissGenerationResult: (projectId?: string) => {

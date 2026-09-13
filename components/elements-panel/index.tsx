@@ -51,7 +51,15 @@ export type TreeEvent =
   | { type: 'select'; nodeId: string }
   | { type: 'hover'; nodeId: string | null }
   /** The user asked for the tree again — same handling as a load, without waiting for one. */
-  | { type: 'refresh' };
+  | { type: 'refresh' }
+  /**
+   * The levels down to a node picked in the preview, with the ancestors to open.
+   *
+   * Applied as one transition rather than as a run of `level` events, because each level is only
+   * mergeable once its parent is known: `level` drops a level whose parent it has not seen, to keep
+   * replies from a replaced document from grafting orphan rows onto the live tree.
+   */
+  | { type: 'reveal'; levels: Array<{ parentId: string | null; nodes: TreeNode[]; truncated: number }>; path: string[] };
 
 export interface TreeTransition {
   state: TreeState;
@@ -126,6 +134,25 @@ export function reduceTree(state: TreeState, event: TreeEvent): TreeTransition {
         ? []
         : [{ type: 'tree-request', nodeId: event.nodeId }];
       return { state: { ...state, expanded }, requests };
+    }
+
+    case 'reveal': {
+      // Empty levels means the frame could not resolve the node. Nothing is dropped for that: the
+      // tree on screen is still the live document's.
+      if (event.levels.length === 0) return { state, requests: [] };
+
+      // Rebuilt from the body level up, so this is the document the frame just described rather
+      // than a merge into whatever the panel happened to be holding.
+      const next = emptyTreeState();
+      for (const level of event.levels) {
+        for (const node of level.nodes) next.nodes.set(node.id, node);
+        next.children.set(level.parentId, level.nodes.map((n) => n.id));
+        if (level.truncated > 0) next.truncated.set(level.parentId, level.truncated);
+      }
+      // Every ancestor opens; the node itself is the last entry and is selected, not expanded.
+      const selectedId = event.path.length > 0 ? event.path[event.path.length - 1] : state.selectedId;
+      for (const id of event.path.slice(0, -1)) next.expanded.add(id);
+      return { state: { ...next, selectedId }, requests: [] };
     }
 
     case 'select': {
@@ -242,6 +269,8 @@ export type ElementsTab = 'tree' | 'styles';
 export interface ElementsPanelHandle {
   /** A level arrived from the frame, lifted through the workspace. */
   handleTreeLevel: (message: Extract<PreviewMessage, { type: 'tree-level' }>) => void;
+  /** The levels needed to reveal a node picked in the preview, and the ancestors to open. */
+  handleTreeLevels: (message: Extract<PreviewMessage, { type: 'tree-levels' }>) => void;
   /** The frame could not resolve an id the panel sent. */
   handleTreeStale: () => void;
   /** The frame loaded a document — the reload signal, and the only safe moment to send. */
@@ -401,6 +430,8 @@ export const ElementsPanel = forwardRef<ElementsPanelHandle, ElementsPanelProps>
   const stateRef = useRef(state);
   const sendRef = useRef(sendToFrame);
   sendRef.current = sendToFrame;
+  /** The node the tree was last opened onto, so one selection is not revealed twice. */
+  const revealedRef = useRef<string | null>(null);
 
   const dispatch = useCallback((event: TreeEvent) => {
     const { state: next, requests } = reduceTree(stateRef.current, event);
@@ -418,9 +449,15 @@ export const ElementsPanel = forwardRef<ElementsPanelHandle, ElementsPanelProps>
         truncated: message.truncated,
       });
     },
+    handleTreeLevels: (message) => {
+      dispatch({ type: 'reveal', levels: message.levels, path: message.path });
+    },
     handleTreeStale: () => dispatch({ type: 'stale' }),
     handleFrameReady: () => {
       dispatch({ type: 'frame-ready' });
+      // The ids died with the old document, so a node revealed in it is not the one an identical
+      // id would name now. Forgetting it lets the same selection be revealed again.
+      revealedRef.current = null;
       stylesRef.current?.handleFrameReady();
     },
     handleStyleComputed: (message) => stylesRef.current?.handleStyleComputed(message),
@@ -437,6 +474,24 @@ export const ElementsPanel = forwardRef<ElementsPanelHandle, ElementsPanelProps>
     stateRef.current = emptyTreeState();
     setState(stateRef.current);
   }, [unavailable]);
+
+  /**
+   * Open the tree onto an element picked in the preview.
+   *
+   * Asked of the frame rather than worked out here: the panel holds only the levels it has
+   * expanded, and nothing in a `TreeNode` says where it sits.
+   *
+   * Skipped when the row is already the selected one, which is what a click *in the tree* leaves
+   * behind by the time its selection round-trips back through the workspace. Without that guard
+   * every row click would rebuild the tree and collapse whatever else the person had opened.
+   */
+  useEffect(() => {
+    const nodeId = selection?.nodeId ?? null;
+    if (!nodeId || unavailable) return;
+    if (stateRef.current.selectedId === nodeId || revealedRef.current === nodeId) return;
+    revealedRef.current = nodeId;
+    sendRef.current({ type: 'tree-path', nodeId });
+  }, [selection, unavailable]);
 
   // Leaving the panel — closing it, or a reorder that unmounts it — must not strand the overlay in
   // the frame, which has no idea the panel is gone.

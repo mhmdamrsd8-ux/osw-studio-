@@ -673,10 +673,18 @@ export function lossMessage(lost: readonly LostOverride[]): string {
 }
 
 /** The whole set of losses, handed to the agent as one request rather than one per control. */
-export function lossAgentPrompt(lost: readonly LostOverride[]): string {
-  const lines = lost.map(item => (
-    `- \`${item.property}\`${item.winner ? ` (beaten by ${item.winner})` : ''}`
-  ));
+export function lossAgentPrompt(
+  lost: readonly LostOverride[],
+  /** This session's transient block, property → value: what the person actually set. */
+  declarations: Record<string, string> = {},
+): string {
+  // The value, not just the property. "padding loses to X" does not say what padding was asked
+  // for, and the agent is being asked to make that value stick.
+  const lines = lost.map(item => {
+    const value = declarations[item.property];
+    const declaration = value ? `${item.property}: ${value}` : item.property;
+    return `- \`${declaration}\`${item.winner ? ` (beaten by ${item.winner})` : ''}`;
+  });
   return 'These style overrides on the selected element have no effect, because something else wins '
     + `the cascade:\n${lines.join('\n')}\n`
     + 'Change the project styles so the element gets the values I asked for.';

@@ -966,7 +966,7 @@ export const StylesContent = forwardRef<StylesContentHandle, StylesContentProps>
                 <Button
                   size="sm"
                   className="h-6 text-xs"
-                  onClick={() => props.onAskAgent(lossAgentPrompt(lost))}
+                  onClick={() => props.onAskAgent(lossAgentPrompt(lost, state.declarations))}
                 >
                   Ask the agent
                 </Button>

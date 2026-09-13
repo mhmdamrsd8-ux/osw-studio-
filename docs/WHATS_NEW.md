@@ -6,6 +6,34 @@ Welcome to OSW Studio! This page highlights the latest features and updates.
 
 ---
 
+## v1.101.0 - Quick Edit and the Simple View (2026-09-13)
+
+Quick edit is a smaller way to change a project: chat, preview and the Inspector, with no file tree and no code editor. You ask for a change, watch it land in the preview, and save when you are happy. What the agent did comes back as a couple of lines you can open, rather than a transcript to read.
+
+The simple view makes that the whole app, for handing a project to someone who did not build it. They get Projects, Deployments and Docs, a project opens straight into quick edit, and the suggestion pills you set in project settings are waiting there: pick "Add an article", say what it should say, save. In Server Mode a workspace owner can add people to their own workspace and start them in the simple view.
+
+Quick edit from a project's menu needs Server Mode. The simple view works in both.
+
+### Quick edit
+- **Chat, preview and the Inspector**: the Inspector opens from the rail when you want to look at an element
+- **A summary instead of a transcript**: what the agent read, edited and ran, in a line or two you can open for the detail
+- **Undo and redo**: step back and forward through the project's checkpoints without opening the studio
+- **Your project's own suggestion pills**: the ones set in project settings, still following the page you are looking at
+
+### Handing a project to someone else
+- **The simple view is each person's own setting**: in Appearance settings, kept on the account in Server Mode and on the device in browser mode
+- **A shorter menu**: Projects, Deployments, Docs and their own settings. Templates, Skills and Interviews are not in it
+- **An owner runs their own workspace's people**: add someone by email, start them in the studio or the simple view, remove them later
+
+### Screenshots
+- **Show the agent what you are looking at**: the attach menu takes a screenshot of the preview and sends it with your message, on a model that reads images
+- **Thumbnails look like the site again**: the browser paints them now, so current colour formats and gradients come out as they do on screen instead of flat grey
+
+### Fixes
+- **"Edited on another device" when no other device was involved**: an ordinary edit could make the next sync report a conflict
+
+---
+
 ## v1.100.0 - Contextual Chat Suggestions and Project Links (2026-09-05)
 
 A chat suggestion can now be limited to the pages it applies to, so the prompts above the chat box follow the preview: "Update the hero" on the front page, "Add a new article" on an article. You pick the pages per suggestion in project settings, and unscoped suggestions fill the remaining slots so a general action stays reachable everywhere. They still only appear on the first message of a conversation.

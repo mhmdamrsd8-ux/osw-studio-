@@ -20,6 +20,7 @@ import { logger } from '@/lib/utils';
 import type { Database } from 'better-sqlite3';
 import { StorageAdapter } from './types';
 import { Project, VirtualFile, FileTreeNode, CustomTemplate, Deployment, EdgeFunction, ServerFunction, Secret, ScheduledFunction } from '../types';
+import { normalizeProjectSettings } from '../project-settings';
 import { Skill } from '../skills/types';
 import type { ModelTemplate, ModelAssignment } from '@/lib/llm/models/assignment';
 import type { CustomConnection } from '@/lib/llm/providers/connection-record';
@@ -960,7 +961,9 @@ export class SQLiteAdapter implements StorageAdapter {
       toISOStringRequired(project.updatedAt),
       toISOString(project.lastSavedAt),
       project.lastSavedCheckpointId ?? null,
-      JSON.stringify(project.settings ?? {}),
+      // Normalized first: a push body can carry settings that are already a JSON string, and
+      // stringifying that again is what stacked the encoding layers one round trip at a time.
+      JSON.stringify(normalizeProjectSettings(project.settings)),
       JSON.stringify(project.costTracking ?? {}),
       project.previewImage ?? null,
       toISOString(project.lastSyncedAt),
@@ -1000,7 +1003,9 @@ export class SQLiteAdapter implements StorageAdapter {
       toISOStringRequired(project.updatedAt),
       toISOString(project.lastSavedAt),
       project.lastSavedCheckpointId ?? null,
-      JSON.stringify(project.settings ?? {}),
+      // Normalized first: a push body can carry settings that are already a JSON string, and
+      // stringifying that again is what stacked the encoding layers one round trip at a time.
+      JSON.stringify(normalizeProjectSettings(project.settings)),
       JSON.stringify(project.costTracking ?? {}),
       project.previewImage ?? null,
       toISOString(project.lastSyncedAt),
@@ -1067,7 +1072,10 @@ export class SQLiteAdapter implements StorageAdapter {
       updatedAt: parseDate(row.updated_at as string),
       lastSavedAt: row.last_saved_at ? parseDate(row.last_saved_at as string) : undefined,
       lastSavedCheckpointId: row.last_saved_checkpoint_id as string | undefined,
-      settings: parseJSON(row.settings as string, {}),
+      // normalizeProjectSettings rather than parseJSON: the column is TEXT, so one layer is
+      // expected, but a row pushed from a client whose settings had already been stringified
+      // carries more than one. See lib/vfs/project-settings.ts.
+      settings: normalizeProjectSettings(row.settings),
       costTracking: parseJSON(row.cost_tracking as string, undefined),
       previewImage: row.preview_image as string | undefined,
       lastSyncedAt: row.last_synced_at ? parseDate(row.last_synced_at as string) : undefined,
