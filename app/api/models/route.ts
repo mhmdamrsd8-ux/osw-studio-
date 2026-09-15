@@ -7,6 +7,7 @@ import { CODEX_BASE_URL, createCodexHeaders, getCodexAccountId } from '@/lib/llm
 import { logger } from '@/lib/utils';
 import pkg from '@/package.json';
 import type { ModelEntry } from '@/lib/llm/llm-client';
+import { OPENROUTER_ATTRIBUTION } from '@/lib/llm/request-builder';
 
 // Shape of an entry in GET /backend-api/codex/models (only the fields we read).
 interface CodexCatalogModel {
@@ -58,8 +59,7 @@ export async function POST(request: NextRequest) {
           const orResponse = await fetch('https://openrouter.ai/api/v1/models', {
             headers: {
               'Authorization': `Bearer ${apiKey}`,
-              'HTTP-Referer': request.headers.get('referer') || 'http://localhost:3000',
-              'X-Title': 'OSW-Studio'
+              ...OPENROUTER_ATTRIBUTION,
             }
           });
           if (orResponse.ok) {

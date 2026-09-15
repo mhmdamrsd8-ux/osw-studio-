@@ -4,6 +4,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Image as ImageIcon, Mic, Brain, Eye, Wrench, BookmarkPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { configManager } from '@/lib/config/storage';
+import { trackAgentProviderChange } from '@/lib/telemetry/provider-selection';
 import { getActiveTemplate, saveAsTemplate } from '@/lib/llm/models/template-store';
 import { loadProviderModels } from '@/lib/llm/models/model-catalog';
 import { Drawer } from './drawer';
@@ -728,6 +729,7 @@ export function ModelsPane() {
   function handleSaveToTemplate() {
     if (isBuiltin || !isDirty) return;
     configManager.saveModelTemplate(template);
+    trackAgentProviderChange(saved.assignment, template.assignment);
     refresh();
   }
 

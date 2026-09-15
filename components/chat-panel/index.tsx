@@ -12,6 +12,7 @@ import type { DebugEvent } from '@/lib/stores/types';
 import { EventProcessor, type Turn, type ToolCall } from './event-processor';
 import { classifyCommand } from '@/lib/agent-activity/classify-command';
 import { shouldShowPacingNotice, type PacingToolItem } from '@/lib/pacing-notice';
+import { STOP_REASONS, STOP_REASON_PROMPT, shouldShowStopReason, type StopReasonId } from '@/lib/telemetry/stop-reason';
 import { configManager } from '@/lib/config/storage';
 import { X } from 'lucide-react';
 import { MarkdownRenderer } from '@/components/markdown-renderer';
@@ -639,6 +640,19 @@ export function ChatPanel({
     };
   }, [generating, pacingItems, isWritePacingItem]);
 
+  // "Why did you stop?", asked once after a stop the user made. Same shape and place as the
+  // pacing notice: the newest thing in the transcript, clearly not a message, one tap to answer
+  // or dismiss. The ask itself is already counted (stop_reason_shown) when the store records
+  // the stop, so what is tracked here is only the answer.
+  const viewedProjectId = useWorkspaceStore(s => s.projectId);
+  const userStop = useWorkspaceStore(s => s.userStop);
+  const clearUserStop = useWorkspaceStore(s => s.clearUserStop);
+  const showStopReason = shouldShowStopReason(userStop, viewedProjectId, generating);
+  const answerStopReason = useCallback((reason: StopReasonId) => {
+    if (userStop) track('stop_reason', { reason, task_id: userStop.taskId });
+    clearUserStop();
+  }, [userStop, clearUserStop]);
+
   const dismissPacingNotice = useCallback(() => {
     configManager.setPacingNoticeDismissed();
     setShowPacingNotice(false);
@@ -866,6 +880,33 @@ export function ChatPanel({
             >
               <X className="h-3 w-3" />
             </button>
+          </div>
+        )}
+        {showStopReason && (
+          <div role="group" aria-label="Why did you stop?" data-testid="stop-reason" className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <div className="flex items-start gap-2">
+              <span className="flex-1">{STOP_REASON_PROMPT}</span>
+              <button
+                type="button"
+                onClick={clearUserStop}
+                aria-label="Dismiss question"
+                className="shrink-0 rounded p-0.5 hover:bg-muted-foreground/10"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {STOP_REASONS.map(r => (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => answerStopReason(r.id)}
+                  className="rounded-full border border-border bg-background px-2.5 py-1 text-xs text-foreground hover:bg-primary/15 hover:text-primary"
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -257,7 +257,7 @@ Habits:
       });
     }
 
-    const headers = buildHeaders(selectedProvider, apiKey, request.headers.get('referer'), providerConfig, wireFormat, requestCustomHeaders);
+    const headers = buildHeaders(selectedProvider, apiKey, providerConfig, wireFormat, requestCustomHeaders);
     
     let processedMessages = chatMessages;
     let anthropicSystemPrompt = '';

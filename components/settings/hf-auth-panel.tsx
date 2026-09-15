@@ -119,7 +119,7 @@ export function HFAuthPanel({ onAuthChange }: HFAuthPanelProps) {
         setIsConnected(true);
         setTokenInput('');
         toast.success('Connected to HuggingFace');
-        track('connection_added', { provider: 'huggingface' });
+        track('connection_added', { provider: 'huggingface', method: 'key' });
         dispatchAuthEvent(true);
       } else {
         toast.error('Invalid token. Check that it has "Inference Providers" permission.');

@@ -239,6 +239,11 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
    * On a phone it is the site with the dock over it instead of the panel switcher.
    */
   const quick = useWorkspaceStore(s => s.quickEdit);
+  // Once per project opened on the quick surface. `mode_switch` covers the agent's mode, not the
+  // surface, so without this the analytics could not say whether quick edit is used at all.
+  useEffect(() => {
+    if (quick) track('quick_edit_opened');
+  }, [quick, project.id]);
   const [checkpointIds, setCheckpointIds] = useState<string[]>([]);
   const [undoCursor, setUndoCursor] = useState<string | null>(null);
   /** Quick edit's own panel pair, kept out of the store so the studio's saved layout is untouched. */
@@ -2018,6 +2023,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
 
   const stopGeneration = useWorkspaceStore(s => s.stopGeneration);
   const continueGeneration = useWorkspaceStore(s => s.continueGeneration);
+  const canContinue = useWorkspaceStore(s => s.canContinueGeneration());
 
   const handleStop = useCallback(() => {
     stopGeneration();
@@ -2683,7 +2689,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                   generating={generating}
                   onGenerate={handleGenerate}
                   onStop={handleStop}
-                  onContinue={handleContinue}
+                  onContinue={canContinue ? handleContinue : undefined}
                   focusContext={includedFocus}
                   onClearFocus={handleDesktopClearFocus}
                   focusPreviewSnippet={focusPreviewSnippet}
@@ -2968,7 +2974,7 @@ export function Workspace({ project, onBack, backLabel, workspaceId, initialPrev
                 generating={generating}
                 onGenerate={handleMobileGenerate}
                 onStop={handleStop}
-                onContinue={handleContinue}
+                onContinue={canContinue ? handleContinue : undefined}
                 focusContext={includedFocus}
                 onClearFocus={handleMobileClearFocus}
                 focusPreviewSnippet={focusPreviewSnippet}

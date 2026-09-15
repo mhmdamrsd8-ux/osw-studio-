@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { configManager } from '@/lib/config/storage';
+import { trackAgentProviderChange } from '@/lib/telemetry/provider-selection';
 import { getProvider } from '@/lib/llm/providers/registry';
 import { track } from '@/lib/telemetry';
 import type { ModelTemplate, ModelRef } from '@/lib/llm/models/assignment';
@@ -251,7 +252,9 @@ export function TemplatesPane() {
   });
 
   function handleApply(id: string) {
+    const before = configManager.getActiveAssignment();
     configManager.setDefaultTemplateId(id);
+    trackAgentProviderChange(before, configManager.getActiveAssignment());
     refresh();
   }
 

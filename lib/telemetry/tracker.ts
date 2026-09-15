@@ -105,6 +105,11 @@ export class TelemetryTracker {
     }
   }
 
+  /** The same test `track` applies before sending. Anything that only exists to feed telemetry should ask this first. */
+  isActive(): boolean {
+    return this.initialized && this.optedIn && TELEMETRY_ENABLED;
+  }
+
   setOptIn(value: boolean): void {
     try {
       if (!value && this.optedIn) {

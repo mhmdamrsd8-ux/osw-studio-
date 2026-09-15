@@ -23,7 +23,7 @@ export interface TelemetryEventDef {
 
 export const EVENT_CATALOG = {
   // usage
-  session_start:      { category: 'usage', disclosure: 'When a session starts' },
+  session_start:      { category: 'usage', disclosure: 'When a session starts, the site that linked here (hostname only) and any utm_source/medium/campaign tag in the address' },
   pageview:           { category: 'usage', disclosure: 'Which views are visited (e.g. dashboard, workspace, settings)' },
   heartbeat:          { category: 'usage', disclosure: 'Session heartbeats (how long the app is open)' },
   telemetry_accepted: { category: 'usage', disclosure: 'That the analytics notice was acknowledged' },
@@ -64,6 +64,9 @@ export const EVENT_CATALOG = {
 
   // features
   mode_switch:        { category: 'features', disclosure: 'Switches between Chat, Code, and Interview modes' },
+  quick_edit_opened:  { category: 'features', disclosure: 'When a project is opened in quick edit' },
+  stop_reason_shown:  { category: 'generation', disclosure: 'That the "why did you stop?" question was shown after a task was stopped, and which of its fixed answers was picked, if any' },
+  stop_reason:        { category: 'generation', disclosure: 'That the "why did you stop?" question was shown after a task was stopped, and which of its fixed answers was picked, if any' },
   interview_started:  { category: 'features', disclosure: 'Interview usage: which built-in template is used (custom templates counted anonymously) and whether interviews complete' },
   interview_completed:{ category: 'features', disclosure: 'Interview usage: which built-in template is used (custom templates counted anonymously) and whether interviews complete' },
   interview_abandoned:{ category: 'features', disclosure: 'Interview usage: which built-in template is used (custom templates counted anonymously) and whether interviews complete' },
@@ -74,7 +77,7 @@ export const EVENT_CATALOG = {
   interview_template_deleted: { category: 'features', disclosure: 'That custom skills or templates are created or deleted (counts only, never names or contents)' },
   model_template_created:     { category: 'features', disclosure: 'That custom skills or templates are created or deleted (counts only, never names or contents)' },
   model_template_deleted:     { category: 'features', disclosure: 'That custom skills or templates are created or deleted (counts only, never names or contents)' },
-  connection_added:   { category: 'features', disclosure: 'Which provider connections are added or removed (never keys or endpoints)' },
+  connection_added:   { category: 'features', disclosure: 'Which provider connections are added or removed and how (sign-in, pasted key, local server; never keys or endpoints)' },
   connection_removed: { category: 'features', disclosure: 'Which provider connections are added or removed (never keys or endpoints)' },
   image_attached:     { category: 'features', disclosure: 'Whether an image was attached to a chat message (not the image itself)' },
   voice_input_used:   { category: 'features', disclosure: 'Whether voice input is used and how the clip is handled (never audio or transcripts)' },

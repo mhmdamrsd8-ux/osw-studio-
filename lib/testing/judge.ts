@@ -1,6 +1,7 @@
 import { ProviderId } from '@/lib/llm/providers/types';
 import { getProvider } from '@/lib/llm/providers/registry';
 import type { UsageInfo } from '@/lib/llm/types';
+import { OPENROUTER_ATTRIBUTION } from '@/lib/llm/request-builder';
 
 /** Normalizes a judge provider's response usage into UsageInfo (undefined if absent). */
 export function extractJudgeUsage(provider: string, model: string, data: unknown): UsageInfo | undefined {
@@ -102,8 +103,9 @@ async function callOpenAICompatible(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   if (provider === 'openrouter') {
-    headers['HTTP-Referer'] = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
-    headers['X-Title'] = 'OSW-Studio';
+    // The judge runs in the interview completion flow, so these are real requests from the app and
+    // carry the same attribution as any other.
+    Object.assign(headers, OPENROUTER_ATTRIBUTION);
   }
 
   const response = await fetch(`${baseUrl}/chat/completions`, {

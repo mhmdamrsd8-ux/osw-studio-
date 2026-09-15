@@ -469,12 +469,23 @@ export function getDefaultModel(provider: ProviderId): string {
       return 'Meta-Llama-3.3-70B-Instruct';
     case 'zhipu':
       return 'glm-5';
+    case 'deepseek':
+      // Native API naming, no vendor prefix. Without this case the switch fell through to the
+      // OpenRouter-style slug below, which api.deepseek.com rejects.
+      return 'deepseek-v4-flash';
     case 'minimax':
       return 'MiniMax-M2.7';
     case 'opencode-go':
       return '';
+    case 'meshllm':
+      // Models come from whatever peers the mesh has, so there is nothing to name up front.
+      return '';
     default:
-      return 'minimax/minimax-m2.7';
+      // No model rather than another vendor's. Every built-in has a case above, so this arm is
+      // only reached by an id that is neither built-in nor a registered custom provider, such as
+      // a stale one left in localStorage. An empty string surfaces as "no model selected", which
+      // is the truth; a real-looking slug would be sent to an API that rejects it.
+      return '';
   }
 }
 

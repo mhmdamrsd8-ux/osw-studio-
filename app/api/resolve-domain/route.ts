@@ -19,6 +19,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getDeploymentByDomain, getDeploymentBySlug, getAllDomainRoutes } from '@/lib/auth/system-database';
+import { wwwCounterpart } from '@/lib/caddy/regenerate';
 
 export async function GET(request: NextRequest) {
   // Bulk list mode — for Caddy config generation
@@ -43,8 +44,11 @@ export async function GET(request: NextRequest) {
   // Strip port if present
   const domain = host.split(':')[0].toLowerCase();
 
-  // Try custom domain first
+  // Try custom domain first, then its www counterpart (www.example.com is
+  // served as a redirect to example.com and vice versa, so Caddy's on-demand
+  // TLS ask must approve a cert for it too)
   let match = getDeploymentByDomain(domain);
+  if (!match) match = getDeploymentByDomain(wwwCounterpart(domain));
 
   // Try subdomain slug (e.g., my-site.oswstudio.com → slug "my-site")
   if (!match) {

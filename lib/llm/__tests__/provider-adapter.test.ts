@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OswsProviderAdapter, ProviderAdapterConfig } from '../provider-adapter';
 import { requestSnapshotStore } from '../request-snapshot';
 import type { Message } from '../core/types';
@@ -214,5 +214,80 @@ describe('ensurePricing paths', () => {
     await adapter.call({ messages });
 
     expect(ensureModelsDevPricing).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A 401 from HuggingFace means the sign-in is gone
+// ---------------------------------------------------------------------------
+
+import { configManager } from '@/lib/config/storage';
+
+function stubBrowser(dispatched: string[], details: unknown[] = []) {
+  const store = new Map<string, string>();
+  vi.stubGlobal('window', { dispatchEvent: (e: Event) => { dispatched.push(e.type); details.push((e as CustomEvent).detail); return true; } } as unknown as Window);
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => { store.set(k, String(v)); },
+    removeItem: (k: string) => { store.delete(k); },
+    clear: () => store.clear(),
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
+    get length() { return store.size; },
+  });
+}
+
+function adapterFor(provider: string): OswsProviderAdapter {
+  const config: ProviderAdapterConfig = {
+    getProviderConfig: () => ({ provider, apiKey: 'k', model: 'm', baseUrl: undefined }),
+    getApiUrl: () => 'http://localhost/api/generate',
+    getReasoningEnabled: () => false,
+    getDebugStreamEnabled: () => false,
+    getModelPricing: () => null,
+    getCachedModels: () => null,
+    progress: { onEvent: vi.fn() },
+  };
+  return new OswsProviderAdapter(config);
+}
+
+describe('a 401 from the provider', () => {
+  const dispatched: string[] = [];
+  const details: unknown[] = [];
+  beforeEach(() => {
+    dispatched.length = 0;
+    details.length = 0;
+    stubBrowser(dispatched, details);
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Invalid username or password.' }), { status: 401 }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('drops a HuggingFace sign-in and says what happened', async () => {
+    configManager.setHFAuth({ access_token: 'hf_dead', username: 'u' });
+
+    await expect(adapterFor('huggingface').call({ messages })).rejects.toMatchObject({
+      status: 401,
+      errorCategory: 'auth_expired',
+      message: expect.stringMatching(/sign-in has expired/i),
+    });
+    // The half a user could not see: the credential is gone and the UI was told.
+    expect(configManager.getHFAuth()).toBeNull();
+    expect(configManager.getProviderApiKey('huggingface')).toBeNull();
+    expect(dispatched).toContain('apiKeyUpdated');
+    expect(details).toContainEqual({ provider: 'huggingface', hasKey: false });
+  });
+
+  it('leaves a HuggingFace sign-in alone when the 401 came from another provider', async () => {
+    configManager.setHFAuth({ access_token: 'hf_live', username: 'u' });
+
+    await expect(adapterFor('openai').call({ messages })).rejects.toMatchObject({ status: 401 });
+    expect(configManager.getHFAuth()?.access_token).toBe('hf_live');
+    expect(dispatched).not.toContain('apiKeyUpdated');
+  });
+
+  it('keeps the provider message when there was no sign-in to drop', async () => {
+    // A pasted key with no stored auth: nothing to clear, and rewording would hide HF's reason.
+    await expect(adapterFor('huggingface').call({ messages })).rejects.toMatchObject({
+      message: 'Invalid username or password.',
+    });
+    expect(dispatched).not.toContain('apiKeyUpdated');
   });
 });

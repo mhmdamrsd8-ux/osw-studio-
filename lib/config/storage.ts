@@ -222,6 +222,16 @@ class ConfigManager {
   }
 
   getProviderApiKey(provider: ProviderId): string | null {
+    // An expired HuggingFace sign-in is dropped here, at the one place every request path reads
+    // the key, rather than sent to be refused. With the auth gone, Settings stops reading
+    // "Connected" and the chat footer's sign-in button appears on its own.
+    if (provider === 'huggingface' && this.isHFAuthExpired()) {
+      this.clearHFAuth();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('apiKeyUpdated', { detail: { provider: 'huggingface', hasKey: false } }));
+      }
+      return null;
+    }
     const settings = this.getSettings();
     if (settings.providerKeys?.[provider]) {
       return settings.providerKeys[provider];
@@ -486,6 +496,15 @@ class ConfigManager {
   // HuggingFace auth management
   getHFAuth(): HFAuthData | null {
     return this.getSettings().hfAuth || null;
+  }
+
+  /**
+   * Whether the stored HuggingFace OAuth token is past its expiry. Pasted tokens carry no
+   * `expires_at` and never expire here; HF's own 401 is the only signal for those.
+   */
+  isHFAuthExpired(): boolean {
+    const auth = this.getHFAuth();
+    return !!auth?.expires_at && Date.now() >= auth.expires_at;
   }
 
   setHFAuth(auth: HFAuthData): void {

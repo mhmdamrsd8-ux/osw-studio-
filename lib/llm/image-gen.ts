@@ -16,6 +16,8 @@ export interface GenerateImageOptions {
   aspectRatio?: string; // e.g. "16:9", "1:1"
   imageSize?: string;   // e.g. "0.5K", "1K", "2K", "4K"
   modalities?: string[]; // model's declared output modalities, e.g. ['image'] or ['image','text']
+  /** The run's abort signal, so Stop cancels an image still being generated. */
+  signal?: AbortSignal;
 }
 
 export interface GeneratedImage {
@@ -35,6 +37,7 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
   const response = await apiFetch('/api/generate-image', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: opts.signal,
     body: JSON.stringify({
       provider: opts.provider,
       apiKey,

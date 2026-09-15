@@ -119,8 +119,9 @@ vi.mock('@/lib/config/storage', () => ({
   },
 }));
 
+const registryMock = vi.hoisted(() => ({ usesOAuth: false }));
 vi.mock('@/lib/llm/providers/registry', () => ({
-  getProvider: () => ({ apiKeyRequired: false, usesOAuth: false }),
+  getProvider: () => ({ apiKeyRequired: false, usesOAuth: registryMock.usesOAuth }),
   getModelContextLength: () => 128000,
 }));
 
@@ -208,6 +209,44 @@ describe('MultiAgentOrchestrator result propagation and lifecycle', () => {
     // CostCalculator mock returns 0.25 per record() call
     expect(result.totalCost).toBe(0.25);
     expect(result.conversation[0].metadata.cost).toBe(0.25);
+  });
+
+  it('stops rather than pausing when an OAuth sign-in has expired', async () => {
+    // A pause offers Continue, which re-sends the request. The adapter has just dropped the
+    // expired credential, so a resend can only fail again: this is the loop users were in.
+    registryMock.usesOAuth = true;
+    const { PausableApiError } = await import('../provider-adapter');
+    let action: string | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    h.loopBehavior.run = async (deps: any): Promise<AgentLoopResult> => {
+      action = await deps.config.onPausableError(new PausableApiError('expired', 401, 'auth', 'auth_expired', 'huggingface', 'm'));
+      return { success: false, summary: 's', exitReason: 'error_stop', totalCost: 0, totalUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, toolCount: 0, turnCount: 0 };
+    };
+    try {
+      // No continue() call: if this pauses, the promise never settles and the test times out.
+      await new MultiAgentOrchestrator('test-p1').execute('build');
+    } finally {
+      registryMock.usesOAuth = false;
+    }
+    expect(action).toBe('stop');
+  });
+
+  it('still pauses for an expired credential on a provider that uses a pasted key', async () => {
+    // Only OAuth sign-ins can be re-run in place. A pasted key needs the user to fix it in
+    // Settings, and Continue after that is the right offer.
+    const { PausableApiError } = await import('../provider-adapter');
+    let action: string | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    h.loopBehavior.run = async (deps: any): Promise<AgentLoopResult> => {
+      action = await deps.config.onPausableError(new PausableApiError('bad key', 401, 'auth', 'auth_expired', 'openai', 'm'));
+      return { success: false, summary: 's', exitReason: 'other', totalCost: 0, totalUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, toolCount: 0, turnCount: 0 };
+    };
+    const orchestrator = new MultiAgentOrchestrator('test-p1');
+    const pending = orchestrator.execute('build');
+    await tick(); await tick();
+    orchestrator.continue();
+    await pending;
+    expect(action).toBe('continue');
   });
 
   it('keeps the tool-executor abort signal connected to stop() across pause/resume', async () => {

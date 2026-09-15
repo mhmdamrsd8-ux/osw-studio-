@@ -48,7 +48,7 @@ export function setupOrchestratorMocks() {
     modelSupportsVision: () => false,
   }));
   vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
-  vi.mock('@/lib/telemetry', () => ({ track: vi.fn() }));
+  vi.mock('@/lib/telemetry', () => ({ track: vi.fn(), isTelemetryActive: vi.fn(() => true) }));
   vi.mock('@/lib/llm/debug-events-state', () => ({
     debugEventsState: { saveEvents: vi.fn(), clearEvents: vi.fn(), loadEvents: vi.fn().mockResolvedValue([]) },
   }));

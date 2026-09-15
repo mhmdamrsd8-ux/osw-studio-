@@ -22,7 +22,7 @@ interface TelemetryDisclosureProps {
 
 // Bump when the collected-events list changes, so the Details badge signals
 // there is something new to review.
-const DISCLOSURE_UPDATED = 'July 2026';
+const DISCLOSURE_UPDATED = 'September 2026';
 
 export function TelemetryDisclosure({ open, onDismiss }: TelemetryDisclosureProps) {
   // Which "what will be collected" category is expanded; only one at a time.

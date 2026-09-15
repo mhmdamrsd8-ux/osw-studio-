@@ -12,6 +12,7 @@ import { ensureModelsDevPricing } from './models-dev';
 import { apiFetch } from '@/lib/api/backend-status';
 import { requestSnapshotStore } from './request-snapshot';
 import { logger } from '@/lib/utils';
+import { configManager } from '@/lib/config/storage';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -148,6 +149,15 @@ export class OswsProviderAdapter implements ProviderAdapter {
       } catch { /* ignore parse failures */ }
 
       const { errorType, errorCategory } = this.classifyError(status, errorMessage);
+
+      // HF refused the sign-in. Drop it now so Settings stops showing "Connected", the chat
+      // footer offers sign-in again, and no retry can re-send the same dead token.
+      if (errorCategory === 'auth_expired' && provider === 'huggingface' && typeof window !== 'undefined'
+          && configManager.getHFAuth()) {
+        configManager.clearHFAuth();
+        window.dispatchEvent(new CustomEvent('apiKeyUpdated', { detail: { provider: 'huggingface', hasKey: false } }));
+        errorMessage = 'Your HuggingFace sign-in has expired. Sign in again to keep going.';
+      }
 
       throw new PausableApiError(errorMessage, status, errorType, errorCategory, provider, model);
     }

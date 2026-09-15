@@ -5,6 +5,7 @@ import { Image as ImageIcon, Mic, Brain, ChevronRight, ChevronDown, Lock, Rotate
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { configManager } from '@/lib/config/storage';
+import { trackAgentProviderChange } from '@/lib/telemetry/provider-selection';
 import type { ModelRef, ModelAssignment } from '@/lib/llm/models/assignment';
 import { getActiveTemplate, resolveActiveAssignment } from '@/lib/llm/models/template-store';
 import { loadProviderModels } from '@/lib/llm/models/model-catalog';
@@ -249,7 +250,9 @@ export function ProjectModelsPanel({ onManageSettings, onDone }: ProjectModelsPa
   // setDefaultTemplateId also loads the template's assignment into the working
   // selection (WT1), so switching clears dirty and re-renders via the dispatch.
   function handleTemplateSelect(id: string) {
+    const before = configManager.getActiveAssignment();
     configManager.setDefaultTemplateId(id);
+    trackAgentProviderChange(before, configManager.getActiveAssignment());
   }
 
   // Apply a slot edit to the WORKING selection. Immediate, global and reactive
@@ -257,7 +260,10 @@ export function ProjectModelsPanel({ onManageSettings, onDone }: ProjectModelsPa
   // does NOT fork built-ins. The working selection simply diverges until the user
   // Saves it into the loaded template or Resets it back.
   function writeSlot(mutate: (a: ModelAssignment) => ModelAssignment) {
-    configManager.setActiveAssignment(mutate(configManager.getActiveAssignment()));
+    const before = configManager.getActiveAssignment();
+    const after = mutate(before);
+    configManager.setActiveAssignment(after);
+    trackAgentProviderChange(before, after);
   }
 
   // Persist the working selection into the loaded (editable) template. Built-ins are

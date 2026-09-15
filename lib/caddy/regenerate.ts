@@ -7,7 +7,9 @@
  * Generates three types of server blocks:
  * 1. Main instance domain (inst-1.oswstudio.com)
  * 2. Subdomain routes (sunny-oak-river.inst-1.oswstudio.com) — wildcard cert
- * 3. Custom domain routes (sweetcandies.com) — on-demand TLS
+ * 3. Custom domain routes (sweetcandies.com) — on-demand TLS, plus a
+ *    www counterpart block (www.sweetcandies.com, or the apex when the stored
+ *    domain is a www name) that redirects to the stored name
  *
  * Does nothing if STATIC_PROXY is not set.
  */
@@ -21,6 +23,17 @@ export interface CaddyConfig {
   publicRoot: string;
   slugRoutes: { deployment_id: string; slug: string }[];
   customDomainRoutes: { deployment_id: string; custom_domain: string }[];
+}
+
+/**
+ * The www counterpart of a custom domain: `example.com` → `www.example.com`,
+ * `www.example.com` → `example.com`. A non-www subdomain (`shop.example.com`)
+ * gets `www.shop.example.com`; that is harmless since a cert is only issued
+ * when a request for that exact name arrives and the resolver approves it.
+ */
+export function wwwCounterpart(domain: string): string {
+  const d = domain.toLowerCase();
+  return d.startsWith('www.') ? d.slice(4) : `www.${d}`;
 }
 
 export function generateCaddyfile(config: CaddyConfig): string {
@@ -92,6 +105,15 @@ export function generateCaddyfile(config: CaddyConfig): string {
     lines.push('  try_files {path} {path}.html {path}/index.html');
     lines.push('  file_server');
     lines.push('  header Cache-Control "public, max-age=3600"');
+    lines.push('}');
+    lines.push('');
+
+    // www counterpart → permanent redirect to the stored (canonical) name
+    lines.push(`${wwwCounterpart(route.custom_domain)} {`);
+    lines.push('  tls {');
+    lines.push('    on_demand');
+    lines.push('  }');
+    lines.push(`  redir https://${route.custom_domain}{uri} permanent`);
     lines.push('}');
     lines.push('');
   }

@@ -6,6 +6,25 @@ Welcome to OSW Studio! This page highlights the latest features and updates.
 
 ---
 
+## v1.102.0 - Images from a ChatGPT Subscription (2026-09-15)
+
+If you have a ChatGPT subscription, the agent can now generate images with it: pick a GPT Image 2 quality under Image generation in Models and it works like any other image model, with no separate key. The rest of this release is about a task ending honestly instead of leaving you with a button that does nothing: an expired HuggingFace sign-in says so and asks you to sign in again, an error the provider will always refuse ends the task with Retry rather than pausing, and Continue only appears where it can resume something.
+
+### Image generation
+- **GPT Image 2 through ChatGPT**: three quality tiers under Image generation in Models, on your subscription rather than a key
+- **Stop means stop**: stopping a task cancels an image still being generated, and a generation that never answers gives up after two minutes instead of holding the task open
+
+### When a task hits a wall
+- **An expired HuggingFace sign-in**: dropped instead of sent, with a message that says so; Settings shows HuggingFace as disconnected so you can sign in again
+- **Errors a retry cannot fix**: an unknown model, an unsupported tool call, a request too long for the model, or spent free credits end the task with Retry, instead of pausing on a Continue that would fail the same way
+- **Continue only where it works**: the button no longer shows on a Server Mode run, where it could not resume anything
+
+### Custom domains (Server Mode)
+- **The other www form redirects**: a site stored as `sweetcandies.com` now answers at `www.sweetcandies.com` with a redirect and its own certificate, and the other way round, once that name's DNS also points at the server. Before, the unstored form failed to connect
+
+### A question after you stop
+- **Why did you stop?**: one tap on a short list, or dismiss it; shown only when anonymous analytics are on, and it is how the next thing to improve gets chosen
+
 ## v1.101.0 - Quick Edit and the Simple View (2026-09-13)
 
 Quick edit is a smaller way to change a project: chat, preview and the Inspector, with no file tree and no code editor. You ask for a change, watch it land in the preview, and save when you are happy. What the agent did comes back as a couple of lines you can open, rather than a transcript to read.

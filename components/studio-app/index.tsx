@@ -116,9 +116,11 @@ function StudioInner() {
             access_token: oauthResult.accessToken,
             username: username || undefined,
             scopes: oauthResult.scope,
+            // The token dies after this; getProviderApiKey drops it once it has.
+            expires_at: oauthResult.accessTokenExpiresAt?.getTime(),
           });
           toast.success(`Connected to HuggingFace${username ? ` as ${username}` : ''}`);
-          track('connection_added', { provider: 'huggingface' });
+          track('connection_added', { provider: 'huggingface', method: 'oauth' });
           window.dispatchEvent(new CustomEvent('apiKeyUpdated', {
             detail: { provider: 'huggingface', hasKey: true }
           }));

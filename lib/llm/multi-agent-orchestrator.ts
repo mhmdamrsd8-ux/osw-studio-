@@ -139,6 +139,20 @@ export interface MultiAgentResult {
 // MultiAgentOrchestrator
 // ---------------------------------------------------------------------------
 
+/** Categories where an identical resend cannot succeed, whatever the user does meanwhile. */
+const TERMINAL_CATEGORIES = new Set(['model_not_found', 'tool_not_supported', 'invalid_request', 'context_too_long']);
+
+export function isTerminalApiError(error: PausableApiError): boolean {
+  if (TERMINAL_CATEGORIES.has(error.errorCategory)) return true;
+  const config = getProvider(error.provider);
+  // An expired OAuth sign-in has just been cleared by the adapter; a pasted key can be replaced.
+  if (error.errorCategory === 'auth_expired' && config.usesOAuth) return true;
+  // HuggingFace's free allowance resets monthly. No Continue can hurry that; a paid provider's
+  // credits can be topped up, so those still pause.
+  if (error.errorCategory === 'credit_exhausted' && error.provider === 'huggingface') return true;
+  return false;
+}
+
 export class MultiAgentOrchestrator {
   private projectId: string;
   private rootAgent: Agent;
@@ -590,7 +604,7 @@ export class MultiAgentOrchestrator {
           // (e.g. FLUX, Grok Imagine) aren't sent an unsupported 'text' modality
           // while multimodal models (e.g. Gemini) still get 'text' as they require.
           const modalities = this.getModelOutputModalities(ref);
-          return generateImage({ provider: ref.provider, apiKey, model: ref.model, prompt, modalities, ...opts });
+          return generateImage({ provider: ref.provider, apiKey, model: ref.model, prompt, modalities, signal: this.abortController.signal, ...opts });
         }
       : undefined;
     const buildToolExecutor = (executorProgress: ProgressReporter) => {
@@ -686,6 +700,14 @@ export class MultiAgentOrchestrator {
             error_type: error.name || 'unknown',
             error_category: 'unknown',
           });
+        }
+        // Pausing offers Continue, which re-sends the same request. That only helps when the
+        // failure can pass on its own or after something the user can fix in place: a server
+        // blip, a rate limit, a pasted key replaced in Settings, credits topped up. For a request
+        // the provider will refuse identically every time, a pause is a dead button, and most API
+        // errors are of that kind. End the task instead; Retry from the checkpoint remains.
+        if (isPausable && isTerminalApiError(error as PausableApiError)) {
+          return 'stop';
         }
         await new Promise<void>(resolve => { this.pauseResolve = resolve; });
         return this.stopped ? 'stop' : 'continue';

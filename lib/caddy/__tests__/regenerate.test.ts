@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateCaddyfile, CaddyConfig } from '../regenerate';
+import { generateCaddyfile, wwwCounterpart, CaddyConfig } from '../regenerate';
 
 const BASE_CONFIG: CaddyConfig = {
   domain: 'inst-1.oswstudio.com',
@@ -112,7 +112,47 @@ describe('generateCaddyfile', () => {
     });
 
     const tryFilesMatches = result.match(/try_files \{path\} \{path\}\.html \{path\}\/index\.html/g) || [];
-    // Main + subdomain + custom domain = 3
+    // Main + subdomain + custom domain = 3 (the www redirect block serves nothing)
     expect(tryFilesMatches.length).toBe(3);
+  });
+
+  it('adds a www redirect block for an apex custom domain', () => {
+    const result = generateCaddyfile({
+      ...BASE_CONFIG,
+      customDomainRoutes: [{ deployment_id: 'xyz', custom_domain: 'sweetcandies.com' }],
+    });
+
+    expect(result).toContain('www.sweetcandies.com {');
+    expect(result).toContain('redir https://sweetcandies.com{uri} permanent');
+    // Redirect block has on-demand TLS but does not serve files
+    const wwwBlock = result.slice(result.indexOf('www.sweetcandies.com {'));
+    expect(wwwBlock).toContain('on_demand');
+    expect(wwwBlock).not.toContain('file_server');
+    // Stored domain still serves the deployment
+    expect(result).toContain('rewrite * /deployments/xyz{uri}');
+  });
+
+  it('adds an apex redirect block for a www custom domain', () => {
+    const result = generateCaddyfile({
+      ...BASE_CONFIG,
+      customDomainRoutes: [{ deployment_id: 'xyz', custom_domain: 'www.sweetcandies.com' }],
+    });
+
+    expect(result).toContain('\nsweetcandies.com {');
+    expect(result).toContain('redir https://www.sweetcandies.com{uri} permanent');
+  });
+
+});
+
+describe('wwwCounterpart', () => {
+  it('maps apex to www and back', () => {
+    expect(wwwCounterpart('example.com')).toBe('www.example.com');
+    expect(wwwCounterpart('www.example.com')).toBe('example.com');
+    expect(wwwCounterpart('WWW.Example.com')).toBe('example.com');
+  });
+
+  it('handles multi-label TLDs and subdomains by prefix only', () => {
+    expect(wwwCounterpart('example.co.uk')).toBe('www.example.co.uk');
+    expect(wwwCounterpart('shop.example.com')).toBe('www.shop.example.com');
   });
 });

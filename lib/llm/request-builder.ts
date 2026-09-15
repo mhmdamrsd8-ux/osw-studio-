@@ -24,11 +24,25 @@ export function getApiEndpoint(
   }
 }
 
-/** Build request headers, by wire format. `referer` is the incoming request's referer (for OpenRouter attribution). */
+/**
+ * How OSW Studio identifies itself to OpenRouter.
+ *
+ * OpenRouter reads these to attribute requests on its public per-model app rankings, so they have
+ * to name the app rather than whatever host it happens to be served from: the incoming request's
+ * referer would split attribution between the Space, localhost and every self-hosted instance.
+ *
+ * `models/route.ts` sends the same pair when it lists models, which is why this is exported rather
+ * than written out twice.
+ */
+export const OPENROUTER_ATTRIBUTION: Record<string, string> = {
+  'HTTP-Referer': 'https://oswstudio.com',
+  'X-Title': 'OSW Studio',
+};
+
+/** Build request headers, by wire format. */
 export function buildHeaders(
   provider: ProviderId,
   apiKey: string | undefined,
-  referer: string | null,
   config: ProviderConfig,
   wireFormat?: WireFormat,
   overrideHeaders?: Record<string, string>,
@@ -45,8 +59,7 @@ export function buildHeaders(
   } else {
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
     if (provider === 'openrouter') {
-      headers['HTTP-Referer'] = referer || 'http://localhost:3000';
-      headers['X-Title'] = 'OSW-Studio';
+      Object.assign(headers, OPENROUTER_ATTRIBUTION);
     }
   }
   // A custom provider's config lives in the client's localStorage, so `config` is a stub here and

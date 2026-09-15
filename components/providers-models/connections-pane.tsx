@@ -95,7 +95,7 @@ function ConnectConfigBody({ providerId, onConnected, onBack }: ConnectConfigBod
       if (isValid) {
         configManager.setProviderApiKey(providerId, key);
         configManager.clearModelCache(providerId);
-        track('connection_added', { provider: providerId });
+        track('connection_added', { provider: providerId, method: 'key' });
         toast.success(`Connected to ${providerConfig.name}!`);
         dispatchApiKeyEvent(true);
         onConnected();
@@ -118,7 +118,7 @@ function ConnectConfigBody({ providerId, onConnected, onBack }: ConnectConfigBod
     try {
       const models = await loadProviderModels(providerId);
       if (models.length > 0) {
-        track('connection_added', { provider: providerId });
+        track('connection_added', { provider: providerId, method: 'local' });
         toast.success(`Connected to ${providerConfig.name} · ${models.length} model${models.length === 1 ? '' : 's'}`);
         dispatchApiKeyEvent(!!currentApiKey.trim());
         onConnected();
@@ -352,7 +352,7 @@ function ConnectCustomBody({ onConnected, onBack }: ConnectCustomBodyProps) {
     configManager.saveCustomProvider(id, cfg);
     if (key) configManager.setProviderApiKey(id, key);
     configManager.clearModelCache(id);
-    track('connection_added', { provider: 'custom' });
+    track('connection_added', { provider: 'custom', method: 'custom' });
     try {
       const models = await loadProviderModels(id);
       if (models.length > 0) {

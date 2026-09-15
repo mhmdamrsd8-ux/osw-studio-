@@ -81,7 +81,7 @@ export function CodexAuthPanel({ onAuthChange }: CodexAuthPanelProps) {
     setIsCompletingRedirect(false);
     setIsLoading(false);
     toast.success('Connected to ChatGPT. Tokens will refresh automatically.');
-    track('connection_added', { provider: 'openai-codex' });
+    track('connection_added', { provider: 'openai-codex', method: 'oauth' });
     dispatchAuthEvent(true);
   }, [dispatchAuthEvent]);
 

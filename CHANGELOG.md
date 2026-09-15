@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.102.0 - 2026-09-15
+
+### Server Mode
+- **A custom domain's www counterpart redirects to it**: `generateCaddyfile` in `lib/caddy/regenerate.ts` emits a second on-demand-TLS block per `custom_domain` for `wwwCounterpart(domain)` (`www.` added or stripped) with `redir https://{custom_domain}{uri} permanent`; `/api/resolve-domain` falls back to the counterpart so the on-demand `ask` approves its certificate. Caddy refused the TLS handshake for the unlisted form.
+
+### AI Providers
+- **Image generation through a ChatGPT subscription**: `openai-codex` lists `gpt-image-2-low`/`-medium`/`-high` (`codexModels` in `registry.ts`, appended by `app/api/models/route.ts` on discovery and by `loadProviderModels` on a cache read, since Codex does not advertise tools as models). `app/api/generate-image/route.ts` sends the Responses `image_generation` tool with `tool_choice` required and reads the PNG from the SSE stream (`extractCodexImage`); `generateImage` refreshes the Codex token first. Contributed in #24.
+- **Image generation requests carry a deadline and the run's abort signal**: every fetch in `app/api/generate-image/route.ts` uses `AbortSignal.any([request.signal, AbortSignal.timeout(IMAGE_GEN_TIMEOUT_MS)])`, default 120s, answering 504 on the deadline and 499 when the caller left, judged by `signal.aborted` rather than the error's name (undici reports a client cancellation as `ResponseAborted`). `GenerateImageOptions.signal` carries `MultiAgentOrchestrator`'s abort, so Stop ends an image still generating. A stalled upstream stream held the tool call open for good.
+- **An expired HuggingFace sign-in is dropped before it is sent**: `setHFAuth` stores `expires_at` from the OAuth result, and `configManager.getProviderApiKey('huggingface')` clears an expired token and fires `apiKeyUpdated` with `{ provider: 'huggingface', hasKey: false }` instead of returning it. `startGeneration` refuses an OAuth provider with no token rather than sending an empty bearer.
+- **A 401 from HuggingFace clears the stored sign-in**: `OswsProviderAdapter` calls `clearHFAuth` and rewrites the message to say the sign-in expired; `MultiAgentOrchestrator.onPausableError` returns `stop` for `auth_expired` on a `usesOAuth` provider instead of pausing. Before, the error card said to reconnect while Settings still showed the account as connected, and Continue re-sent the dead token.
+- **`getDefaultModel` covers `deepseek` and `meshllm`**: `deepseek` returns `deepseek-v4-flash`, `meshllm` returns `''`, and the `default` arm returns `''`. Both fell through to the OpenRouter slug `minimax/minimax-m2.7`, which their APIs reject.
+- **OpenRouter requests send `HTTP-Referer: https://oswstudio.com`**: `OPENROUTER_ATTRIBUTION` in `lib/llm/request-builder.ts` (with `X-Title: OSW Studio`) is sent by `buildHeaders`, `app/api/models/route.ts` and `lib/testing/judge.ts`. The `referer` parameter of `buildHeaders` is removed; the header carried the incoming request's host.
+
+### Telemetry
+- **`provider_selected` fires from the models dialog**: `trackAgentProviderChange` in `lib/telemetry/provider-selection.ts` emits it on a slot edit, template switch or template save when the agent's provider changes. The previous emitter in `ModelSettingsPanel` is only rendered by `/test-generation`, so the event had stopped for real users.
+- **`connection_added` carries `method`**: `oauth`, `key`, `local` or `custom`, so an HF sign-in and a pasted HF key are no longer the same payload.
+- **`session_start` carries `referrer_host` and `utm_source`/`utm_medium`/`utm_campaign`**: `sessionStartFields` in `lib/telemetry/session-fields.ts`, hostname only, same-origin referrers dropped, tags truncated to 64 characters.
+- **`quick_edit_opened` fires when a project opens in quick edit**: emitted by `Workspace`. Catalogue disclosures updated for the new fields and events; `DISCLOSED_KEY` is `osw-telemetry-disclosed-v3` and `DISCLOSURE_UPDATED` is September 2026, so the notice shows once more to anyone who saw the July one.
+
+### AI Orchestration
+- **An API error ends the task unless a resend could pass**: `isTerminalApiError` in `multi-agent-orchestrator.ts` returns `stop` from `onPausableError` for `model_not_found`, `tool_not_supported`, `invalid_request`, `context_too_long`, `auth_expired` on a `usesOAuth` provider and `credit_exhausted` on `huggingface`; other categories still pause with Continue.
+
+### UI
+- **The chat panel asks why a task was stopped**: `stopGeneration` records `userStop` on the store and emits `stop_reason_shown`, only while `isTelemetryActive()`; `ChatPanel` renders a dismissable chip row (`STOP_REASONS` in `lib/telemetry/stop-reason.ts`, four answers plus `other`, shown per `shouldShowStopReason`) as the newest transcript item and emits `stop_reason` with the pick. Cleared by an answer, a dismissal or the next task.
+- **The Continue button renders only for a client-side run**: `Workspace` passes `onContinue` only when the store's `canContinueGeneration()` is true, which needs the viewed project's task to hold an `orchestratorInstance`. A server-mode run has none and `/api/server-generate/resume` refuses, so the button did nothing there.
+
+### Tests
+- **Coverage for the HuggingFace expiry, terminal errors, the stop ask, the telemetry fields and Codex images**: `hf-auth-expiry`, `terminal-api-error`, `registry-defaults`, `orchestrator-user-stop`, `provider-selection`, `session-fields`, `tracker-active`, `model-catalog-codex-cache`, `resolve-domain/route` and `generate-image/route`. `registry-defaults` sweeps every `BuiltInProviderId` through `getDefaultModel`, so a provider added without a case fails there.
+- **State a `vi.mock` factory reads must come from `vi.hoisted`**: the factory is hoisted above every top-level `const`, so `const track = vi.fn()` referenced inside it throws `Cannot access before initialization` at load and the file reports no tests, which a filtered run shows as passing.
+
 ## v1.101.0 - 2026-09-13
 
 ### Quick Edit

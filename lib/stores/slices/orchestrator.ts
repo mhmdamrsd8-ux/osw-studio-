@@ -5,7 +5,7 @@ import type { PendingImage, PendingAudio, PendingFile } from '@/lib/llm/multi-ag
 import { configManager } from '@/lib/config/storage';
 import { getProvider } from '@/lib/llm/providers/registry';
 import { toast } from 'sonner';
-import { track } from '@/lib/telemetry';
+import { track, isTelemetryActive } from '@/lib/telemetry';
 import { vfs } from '@/lib/vfs';
 import type { Project, ProjectRuntime } from '@/lib/vfs/types';
 import type { WorkspaceMode } from './project';
@@ -172,8 +172,19 @@ export interface OrchestratorSlice {
   sseClient: SSEClient | null;
 
   generating: boolean;
+  /**
+   * The last task the user stopped by hand, for the chat panel's "why did you stop?" ask. Cleared
+   * when answered, dismissed, or a new task starts; never set for a failure or a completion.
+   */
+  userStop: { projectId: string; taskId: string; at: number } | null;
+  clearUserStop: () => void;
 
   isProjectGenerating: (projectId: string) => boolean;
+  /**
+   * Whether Continue can do anything for the viewed project: only a client-side orchestrator holds
+   * a pause to resolve. Server-mode runs have none, and offering the button there did nothing.
+   */
+  canContinueGeneration: () => boolean;
   isAnyGenerating: () => boolean;
 
   // Event methods
@@ -244,6 +255,8 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
   projectCost: 0,
   sseClient: null,
   generating: false,
+  userStop: null,
+  clearUserStop: () => set({ userStop: null }),
   pendingApproval: null,
 
   _provideApprovalCallback: (projectId: string) => (req: ApprovalRequest) =>
@@ -274,6 +287,8 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
     set({ pendingApproval: null });
     queued.forEach((a) => a.resolve('deny'));
   },
+
+  canContinueGeneration: () => !!get().generationTasks.get(get().projectId)?.orchestratorInstance,
 
   isProjectGenerating: (projectId: string) => {
     const task = get().generationTasks.get(projectId);
@@ -532,16 +547,21 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
       toast.error('Could not resolve this project\'s model configuration. Check your provider settings.');
       return false;
     }
+    if (get().userStop) set({ userStop: null });
     const currentProvider = assignment.agent.provider;
     const providerConfig = getProvider(currentProvider);
     const apiKey = configManager.getProviderApiKey(currentProvider);
 
-    if (providerConfig.apiKeyRequired && !apiKey && !providerConfig.usesOAuth) {
+    if (providerConfig.apiKeyRequired && !apiKey) {
       // Clean up the task we pre-created
       const cancelTasks = new Map(get().generationTasks);
       cancelTasks.delete(projectId);
       set({ generationTasks: cancelTasks, ...deriveScalarFields(cancelTasks, get().projectId) });
-      toast.error(`Please set your ${providerConfig.name} API key in settings`);
+      // OAuth providers stop here too rather than sending an empty bearer, and an expired sign-in
+      // lands here as well since getProviderApiKey drops it.
+      toast.error(providerConfig.usesOAuth
+        ? `Sign in with ${providerConfig.name} to run tasks`
+        : `Please set your ${providerConfig.name} API key in settings`);
       return false;
     }
 
@@ -796,6 +816,15 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
 
     // Release any waiting approval promises so gated sub-agents don't hang.
     get().clearPendingApprovals();
+
+    // Recorded before either branch: the server path returns early, and the ask is about the
+    // person's decision, not about which side of the wire ended the run. Never while telemetry
+    // is off: the only reason to ask is to send the answer, and being asked anyway would read as
+    // the opt-out not having taken.
+    if (task && task.result === null && isTelemetryActive()) {
+      set({ userStop: { projectId: targetId, taskId: targetId, at: Date.now() } });
+      track('stop_reason_shown', { task_id: targetId });
+    }
 
     if (task?.serverTaskId) {
       // Soft stop: abort the current inference and let the server emit task_complete. When the

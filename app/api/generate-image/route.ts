@@ -3,6 +3,43 @@ import { ProviderId } from '@/lib/llm/providers/types';
 import { getProvider } from '@/lib/llm/providers/registry';
 import { CODEX_BASE_URL, createCodexHeaders, getCodexAccountId } from '@/lib/llm/codex-utils';
 
+/**
+ * Image generation runs long, and an upstream that stalls or never closes its stream left nothing
+ * to break the wait: the agent sat on the tool call for good, which read as "stuck". Every
+ * upstream fetch here carries a deadline and the caller's own abort, so Stop in the chat ends it
+ * and a dead upstream ends itself. Overridable for tests; two minutes is generous for a real one.
+ */
+function imageGenTimeoutMs(): number {
+  return Number(process.env.IMAGE_GEN_TIMEOUT_MS) || 120_000;
+}
+
+function deadlineSignal(request: NextRequest): AbortSignal {
+  const timeout = AbortSignal.timeout(imageGenTimeoutMs());
+  return request.signal ? AbortSignal.any([request.signal, timeout]) : timeout;
+}
+
+/** The response for an upstream call that was cut short, by the caller or by the deadline. */
+function abortedResponse(request: NextRequest): NextResponse {
+  if (request.signal?.aborted) {
+    return NextResponse.json({ error: 'Image generation was cancelled' }, { status: 499 });
+  }
+  return NextResponse.json(
+    { error: `Image generation timed out after ${Math.round(imageGenTimeoutMs() / 1000)}s. Try again, or pick another image model.` },
+    { status: 504 },
+  );
+}
+
+/**
+ * Whether a rejected upstream call was cut short by our signal. Judged by the signal, not the
+ * error's name: undici reports a client-side cancellation as `ResponseAborted`, a signal abort
+ * as `AbortError`, and the deadline as `TimeoutError`, and a name check missed the first of
+ * those in practice while the fetch had in fact been cancelled.
+ */
+function wasCutShort(signal: AbortSignal, err: unknown): boolean {
+  if (signal.aborted) return true;
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
+
 const CODEX_IMAGE_QUALITIES: Record<string, string> = {
   'gpt-image-2-low': 'low',
   'gpt-image-2-medium': 'medium',
@@ -15,7 +52,7 @@ function codexImageSize(aspectRatio?: string): string {
   return '1024x1024';
 }
 
-export function extractCodexImage(value: unknown): string | undefined {
+function extractCodexImage(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     let found: string | undefined;
     for (const item of value) found = extractCodexImage(item) || found;
@@ -68,7 +105,8 @@ async function generateCodexImage(
   apiKey: string,
   model: string,
   prompt: string,
-  aspectRatio?: string,
+  aspectRatio: string | undefined,
+  signal: AbortSignal,
 ): Promise<Response> {
   const quality = CODEX_IMAGE_QUALITIES[model];
   if (!quality) {
@@ -86,6 +124,7 @@ async function generateCodexImage(
   const response = await fetch(`${CODEX_BASE_URL}/codex/responses`, {
     method: 'POST',
     headers,
+    signal,
     body: JSON.stringify({
       model: 'gpt-5.5',
       store: false,
@@ -123,6 +162,8 @@ async function generateCodexImage(
     return NextResponse.json({ error: detail || `Codex image request failed (${response.status})` }, { status: response.status });
   }
 
+  // The signal cancels the body stream as well as the connection, so a stalled SSE read ends here
+  // rather than looping forever.
   const image = await collectCodexImage(response);
   if (!image) return NextResponse.json({ error: 'Codex returned no generated image' }, { status: 422 });
   return NextResponse.json({ image: `data:image/png;base64,${image}` });
@@ -151,8 +192,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const signal = deadlineSignal(request);
+
     if (selectedProvider === 'openai-codex') {
-      return generateCodexImage(apiKey, model, prompt, image_config?.aspect_ratio);
+      try {
+        return await generateCodexImage(apiKey, model, prompt, image_config?.aspect_ratio, signal);
+      } catch (err) {
+        if (wasCutShort(signal, err)) return abortedResponse(request);
+        throw err;
+      }
     }
 
     const baseUrl = providerConfig.baseUrl || 'https://openrouter.ai/api/v1';
@@ -180,14 +228,21 @@ export async function POST(request: NextRequest) {
       body.image_config = image_config;
     }
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      if (wasCutShort(signal, err)) return abortedResponse(request);
+      throw err;
+    }
 
     if (!response.ok) {
       let detail = '';

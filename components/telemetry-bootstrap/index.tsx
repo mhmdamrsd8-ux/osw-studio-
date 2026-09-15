@@ -3,16 +3,17 @@
 import { useEffect, useState, useCallback } from 'react';
 import { initTelemetry, track } from '@/lib/telemetry';
 import { markSessionStartedOnce } from '@/lib/telemetry/session-guard';
+import { sessionStartFields } from '@/lib/telemetry/session-fields';
 import { configManager } from '@/lib/config/storage';
 import { TelemetryDisclosure } from '@/components/telemetry-disclosure';
 
 /**
  * Initializes telemetry and shows the first-run disclosure. Mounted by both
  * the browser-mode SPA (StudioApp) and the server-mode PageWrapper so every
- * deployment mode reports. The v2 key re-shows the updated disclosure once to
- * users who saw the old one; users who opted out are never re-prompted.
+ * deployment mode reports. The key's version re-shows the updated disclosure
+ * once to users who saw an older one; users who opted out are never re-prompted.
  */
-const DISCLOSED_KEY = 'osw-telemetry-disclosed-v2';
+const DISCLOSED_KEY = 'osw-telemetry-disclosed-v3';
 
 export function TelemetryBootstrap() {
   const [showDisclosure, setShowDisclosure] = useState(false);
@@ -22,7 +23,7 @@ export function TelemetryBootstrap() {
     // Once per page load, even though PageWrapper remounts on every server-mode
     // route navigation.
     if (markSessionStartedOnce()) {
-      track('session_start');
+      track('session_start', sessionStartFields(document.referrer, window.location.search, window.location.hostname));
     }
     try {
       const optedOut = configManager.getSettings().telemetryOptIn === false;
