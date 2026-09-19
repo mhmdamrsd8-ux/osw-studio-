@@ -46,6 +46,8 @@ export interface ProviderAdapterConfig {
   getDebugStreamEnabled: () => boolean;
   getModelPricing: (provider: string, model: string) => unknown;
   getCachedModels: (provider: string) => { models: { id: string; supportsFunctions?: boolean }[] } | null;
+  /** Context length a local provider is loaded with; undefined for cloud providers. */
+  getLocalContextLength?: () => number | undefined;
   progress: ProgressReporter;
 }
 
@@ -94,6 +96,7 @@ export class OswsProviderAdapter implements ProviderAdapter {
     // Skip reasoning for silent calls (compaction) — saves tokens and avoids streaming noise
     const reasoningEnabled = !silent && this.config.getReasoningEnabled(model);
 
+    const localContextLength = this.config.getLocalContextLength?.();
     const requestBody = {
       messages: params.messages,
       apiKey,
@@ -105,6 +108,7 @@ export class OswsProviderAdapter implements ProviderAdapter {
       ...(reasoningEnabled && { reasoning: { enabled: true } }),
       ...(providerConfig.baseUrl ? { baseUrl: providerConfig.baseUrl } : {}),
       ...(providerConfig.customHeaders ? { customHeaders: providerConfig.customHeaders } : {}),
+      ...(localContextLength ? { context_length: localContextLength } : {}),
     };
 
     // Debug capture of the exact outgoing history (no-op unless enabled in the

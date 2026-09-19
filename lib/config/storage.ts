@@ -77,6 +77,8 @@ export interface AppSettings {
   compactionEnabled?: Partial<Record<ProviderId, boolean>>;
   /** Per-provider compaction limit override (tokens). Empty = automatic. */
   compactionLimits?: Partial<Record<ProviderId, number>>;
+  /** Context length (tokens) a local provider is loaded with. Empty = default. */
+  localContextLengths?: Partial<Record<ProviderId, number>>;
   codexAuth?: CodexAuthData;
   hfAuth?: HFAuthData;
   telemetryOptIn?: boolean;
@@ -546,6 +548,17 @@ class ConfigManager {
       map[provider] = false;
     }
     this.setSetting('compactionEnabled', map);
+  }
+
+  getLocalContextLength(provider: ProviderId): number | undefined {
+    return this.getSettings().localContextLengths?.[provider];
+  }
+
+  setLocalContextLength(provider: ProviderId, length: number | undefined): void {
+    const lengths = { ...this.getSettings().localContextLengths };
+    if (length === undefined) delete lengths[provider];
+    else lengths[provider] = length;
+    this.setSetting('localContextLengths', lengths);
   }
 
   getCompactionLimit(provider: ProviderId): number | undefined {

@@ -146,7 +146,7 @@ export class OswsToolExecutor implements ToolExecutor {
       ]);
 
       const isError = resultContent.startsWith('Error:');
-      const signals = this.extractSignals(toolCall, resultContent, setupComplete, awaitingUser);
+      const signals = this.extractSignals(toolCall, resultContent, setupComplete, awaitingUser, isError);
 
       const result: ToolResult = {
         tool_call_id: toolCall.id,
@@ -196,12 +196,18 @@ export class OswsToolExecutor implements ToolExecutor {
     toolCall: ToolCall,
     output: string,
     setupComplete: boolean,
-    awaitingUser: boolean
+    awaitingUser: boolean,
+    isError = false,
   ): Record<string, unknown> {
     const signals: Record<string, unknown> = {};
 
     if (setupComplete) signals.setupComplete = true;
     if (awaitingUser) signals.awaitingUser = true;
+
+    // A failed command completes nothing. Models chain `edit && build && status --complete`;
+    // when the edit fails the chain stops there and `status` never runs, but the flag is
+    // still in the command text, and honouring it ended the task on an unapplied edit.
+    if (isError) return signals;
 
     // Parse the command from tool call arguments
     let cmd = '';

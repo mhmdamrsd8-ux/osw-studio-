@@ -54,28 +54,49 @@ const codexModels: ProviderModel[] = [
 
 const geminiModels: ProviderModel[] = [
   {
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
-    description: 'Latest fast Gemini model with thinking',
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    description: 'Current fast Gemini model with thinking',
     contextLength: 1048576,
     maxTokens: 65536,
     supportsFunctions: true,
+    supportsReasoning: true,
   },
   {
-    id: 'gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro',
+    id: 'gemini-3.5-flash',
+    name: 'Gemini 3.5 Flash',
+    description: 'Fast Gemini model with thinking',
+    contextLength: 1048576,
+    maxTokens: 65536,
+    supportsFunctions: true,
+    supportsReasoning: true,
+  },
+  {
+    id: 'gemini-3.1-pro-preview',
+    name: 'Gemini 3.1 Pro Preview',
     description: 'Advanced reasoning and analysis',
     contextLength: 1048576,
     maxTokens: 65536,
     supportsFunctions: true,
+    supportsReasoning: true,
   },
   {
-    id: 'gemini-2.0-flash',
-    name: 'Gemini 2.0 Flash',
-    description: 'Fast and versatile',
+    id: 'gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
+    description: 'Previous generation fast model',
     contextLength: 1048576,
-    maxTokens: 8192,
+    maxTokens: 65536,
     supportsFunctions: true,
+    supportsReasoning: true,
+  },
+  {
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro',
+    description: 'Previous generation reasoning model',
+    contextLength: 1048576,
+    maxTokens: 65536,
+    supportsFunctions: true,
+    supportsReasoning: true,
   }
 ];
 
@@ -280,7 +301,7 @@ export const providers: Record<BuiltInProviderId, ProviderConfig> = {
     name: 'Ollama',
     description: 'Run models locally with Ollama',
     apiKeyRequired: false,
-    baseUrl: 'http://localhost:11434/v1',
+    baseUrl: 'http://127.0.0.1:11434/v1',
     supportsModelDiscovery: true,
     supportsFunctions: true,
     supportsStreaming: true,
@@ -291,7 +312,7 @@ export const providers: Record<BuiltInProviderId, ProviderConfig> = {
     name: 'LM Studio',
     description: 'Local model server with tool use support',
     apiKeyRequired: false,
-    baseUrl: 'http://localhost:1234/v1',
+    baseUrl: 'http://127.0.0.1:1234/v1',
     supportsModelDiscovery: true,
     supportsFunctions: true,
     supportsStreaming: true,
@@ -302,7 +323,7 @@ export const providers: Record<BuiltInProviderId, ProviderConfig> = {
     name: 'llama.cpp',
     description: 'Run GGUF models locally with llama-server',
     apiKeyRequired: false,
-    baseUrl: 'http://localhost:8080/v1',
+    baseUrl: 'http://127.0.0.1:8080/v1',
     supportsModelDiscovery: true,
     supportsFunctions: true,
     supportsStreaming: true,
@@ -313,7 +334,7 @@ export const providers: Record<BuiltInProviderId, ProviderConfig> = {
     name: 'mesh-llm',
     description: 'Distributed p2p inference — free open models via shared compute',
     apiKeyRequired: false,
-    baseUrl: 'http://localhost:9337/v1',
+    baseUrl: 'http://127.0.0.1:9337/v1',
     supportsModelDiscovery: true,
     supportsFunctions: true,
     supportsStreaming: true,
@@ -455,7 +476,7 @@ export function getDefaultModel(provider: ProviderId): string {
     case 'groq':
       return 'llama-3.3-70b-versatile';
     case 'gemini':
-      return 'gemini-2.5-flash';
+      return 'gemini-3.8-flash';
     case 'huggingface':
       // Recommended onboarding default (confirmed live on router.huggingface.co).
       return 'deepseek-ai/DeepSeek-V4-Flash';

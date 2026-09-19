@@ -22,6 +22,7 @@ import { checkpointManager, Checkpoint } from '@/lib/vfs/checkpoint';
 import { saveManager } from '@/lib/vfs/save-manager';
 import { configManager } from '@/lib/config/storage';
 import { getProvider, getModelContextLength } from '@/lib/llm/providers/registry';
+import { boundCompactionLimit, resolveLocalContextLength } from '@/lib/llm/local-context';
 import type { ProviderId } from '@/lib/llm/providers/types';
 import { CostCalculator } from './cost-calculator';
 import { ToolCall, UsageInfo, ContentBlock } from './types';
@@ -589,6 +590,7 @@ export class MultiAgentOrchestrator {
       getDebugStreamEnabled: () => this.getConfig().getDebugStreamEnabled(),
       getModelPricing: (p, m) => this.getConfig().getModelPricing(p, m),
       getCachedModels: (p) => this.getConfig().getCachedModels(p),
+      getLocalContextLength: () => this.getLocalContextLength(),
       progress,
     });
 
@@ -654,6 +656,7 @@ export class MultiAgentOrchestrator {
         getDebugStreamEnabled: () => this.getConfig().getDebugStreamEnabled(),
         getModelPricing: (p, m) => this.getConfig().getModelPricing(p, m),
         getCachedModels: (p) => this.getConfig().getCachedModels(p),
+        getLocalContextLength: () => this.getLocalContextLength(),
         progress: childProgress,
       }),
       createChildExecutor: (childProgress: ProgressReporter) => buildToolExecutor(childProgress),
@@ -959,6 +962,11 @@ export class MultiAgentOrchestrator {
   }
 
   private resolveCompactionLimit(): number {
+    // A local model is loaded with the provider's context length; nothing may exceed it.
+    return boundCompactionLimit(this.resolveUnboundedCompactionLimit(), this.getLocalContextLength());
+  }
+
+  private resolveUnboundedCompactionLimit(): number {
     const { provider, model } = this.getProviderConfig();
     // Assignment-level limit takes precedence over per-provider config
     const userLimit = this.assignment?.compactLimit ?? this.getConfig().getCompactionLimit(provider);
@@ -968,6 +976,13 @@ export class MultiAgentOrchestrator {
     const cachedLimit = this.getConfig().getModelContextLengthFromCache(provider, model);
     if (cachedLimit) return cachedLimit;
     return MultiAgentOrchestrator.DEFAULT_COMPACTION_LIMIT;
+  }
+
+  /** The context length a local provider runs with; undefined for cloud providers. */
+  private getLocalContextLength(): number | undefined {
+    const { provider } = this.getProviderConfig();
+    if (!getProvider(provider as ProviderId).isLocal) return undefined;
+    return resolveLocalContextLength(this.getConfig().getLocalContextLength?.(provider));
   }
 
   private resetErrors(): void {

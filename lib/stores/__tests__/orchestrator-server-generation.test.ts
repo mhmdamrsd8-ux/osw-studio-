@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createTestStore, setupOrchestratorMocks } from './test-helpers';
 import { getProjectAssignment } from '@/lib/llm/models/project-assignment';
+import { getProvider } from '@/lib/llm/providers/registry';
+import { configManager } from '@/lib/config/storage';
 import { toast } from 'sonner';
 
 // Side-effects reached only on the success path — stubbed so the test stays
@@ -80,5 +82,35 @@ describe('orchestrator slice — startServerGeneration model resolution', () => 
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalled();
+  });
+
+  // A local provider has no key. Server mode used to refuse to start any task without one,
+  // which locked self-hosted users out of Ollama entirely.
+  it('starts a task on a keyless local provider', async () => {
+    vi.mocked(getProvider).mockReturnValue({ name: 'Ollama', apiKeyRequired: false, isLocal: true, usesOAuth: false } as any);
+    vi.mocked(configManager.getProviderApiKey).mockReturnValue('');
+    vi.mocked(configManager.getLocalContextLength).mockReturnValue(65536);
+    vi.mocked(getProjectAssignment).mockResolvedValue({
+      agent: { provider: 'ollama', model: 'qwen3:4b' }, imageGen: null, voiceInput: null, autoCompact: false, compactLimit: null,
+    } as any);
+
+    await store.getState().startServerGeneration('proj1', 'change the heading', false);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ model: 'qwen3:4b', apiKey: '' });
+    // The server runs the loop, so the local window has to travel with the request.
+    expect(body.generationParams.localContextLength).toBe(65536);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a cloud provider with no key', async () => {
+    vi.mocked(getProvider).mockReturnValue({ name: 'OpenAI', apiKeyRequired: true, isLocal: false, usesOAuth: false } as any);
+    vi.mocked(configManager.getProviderApiKey).mockReturnValue('');
+
+    await store.getState().startServerGeneration('proj1', 'change the heading', false);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledTimes(1);
   });
 });

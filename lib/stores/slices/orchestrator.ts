@@ -1174,9 +1174,9 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
       return false;
     }
 
-    // Server-mode generation always requires an API key in the request body
-    // (the backend has no server-side auth resolution for the user's provider).
-    if (!apiKey) {
+    // Server-mode generation carries the key in the request body (the backend has no
+    // server-side auth resolution for the user's provider). Local providers have none.
+    if (!apiKey && providerConfig.apiKeyRequired) {
       toast.error(`Please set your ${providerConfig.name} API key in settings`);
       abandonClaim();
       return false;
@@ -1299,6 +1299,7 @@ export const createOrchestratorSlice: StateCreator<CombinedState, [], [], Orches
             reasoningEnabled: configManager.getReasoningEnabled(model),
             compactionEnabled: configManager.isCompactionEnabled(provider),
             compactionLimit: configManager.getCompactionLimit(provider),
+            localContextLength: configManager.getLocalContextLength(provider),
             debugStreamEnabled: configManager.getDebugStreamEnabled(),
             modelPricing: {},
             cachedModels: configManager.getCachedModels(provider)?.models ?? [],

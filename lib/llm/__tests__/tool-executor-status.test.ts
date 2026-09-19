@@ -100,4 +100,17 @@ describe('OswsToolExecutor status signal extraction', () => {
 
     expect(result.signals?.statusComplete).toBe(true);
   });
+
+  it('does not complete on a chained status when the command failed before it ran', async () => {
+    h.toolOutput = 'Error: ss --entity: selector not found in /index.html';
+    const executor = makeExecutor();
+
+    const result = await executor.execute(
+      statusCall(`ss --entity /index.html << 'EOF'\n<h1>New</h1>\nEOF && build && status --task "t" --done "d" --remaining "none" --complete`),
+      { agentType: 'orchestrator', isReadOnly: false },
+    );
+
+    expect(result.signals?.statusComplete).toBeUndefined();
+    expect(result.signals?.statusResult).toBeUndefined();
+  });
 });

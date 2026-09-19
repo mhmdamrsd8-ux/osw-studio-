@@ -28,11 +28,12 @@ export function setupOrchestratorMocks() {
       getApiKey: () => 'sk-test',
       getDefaultModel: () => 'gpt-4',
       getProviderModel: () => 'gpt-4',
-      getProviderApiKey: () => 'sk-test',
+      getProviderApiKey: vi.fn(() => 'sk-test'),
       getCachedModels: () => null,
       getReasoningEnabled: () => false,
       isCompactionEnabled: () => false,
       getCompactionLimit: () => null,
+      getLocalContextLength: vi.fn(() => undefined),
       getDebugStreamEnabled: () => false,
       getPermissionMode: () => 'auto',
       getPermissionOverrides: () => ({}),
@@ -44,7 +45,7 @@ export function setupOrchestratorMocks() {
     migrateBackendKey: () => false,
   }));
   vi.mock('@/lib/llm/providers/registry', () => ({
-    getProvider: () => ({ name: 'OpenAI', apiKeyRequired: true, isLocal: false, usesOAuth: false }),
+    getProvider: vi.fn(() => ({ name: 'OpenAI', apiKeyRequired: true, isLocal: false, usesOAuth: false })),
     modelSupportsVision: () => false,
   }));
   vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));

@@ -129,6 +129,39 @@ describe('OswsProviderAdapter custom headers in the request body', () => {
   });
 });
 
+describe('OswsProviderAdapter local context length in the request body', () => {
+  function adapterWith(getLocalContextLength?: () => number | undefined): OswsProviderAdapter {
+    return new OswsProviderAdapter({
+      getProviderConfig: () => ({ provider: 'ollama', apiKey: '', model: 'qwen3:4b', baseUrl: 'http://127.0.0.1:11434/v1' }),
+      getApiUrl: () => 'http://localhost/api/generate',
+      getReasoningEnabled: () => false,
+      getDebugStreamEnabled: () => false,
+      getModelPricing: () => ({ input: 0, output: 0 }),
+      getCachedModels: () => null,
+      ...(getLocalContextLength ? { getLocalContextLength } : {}),
+      progress: { onEvent: vi.fn() },
+    });
+  }
+
+  function sentBody(): Record<string, unknown> {
+    const call = vi.mocked(apiFetch).mock.calls[0];
+    return JSON.parse((call[1] as { body: string }).body);
+  }
+
+  beforeEach(() => vi.mocked(apiFetch).mockClear());
+
+  it('sends the window a local model should be loaded with', async () => {
+    // The server applies it as Ollama's num_ctx; the client has the setting, the server does not.
+    await adapterWith(() => 65536).call({ messages });
+    expect(sentBody().context_length).toBe(65536);
+  });
+
+  it('sends nothing for a provider with no local window', async () => {
+    await adapterWith(() => undefined).call({ messages });
+    expect(sentBody()).not.toHaveProperty('context_length');
+  });
+});
+
 describe('ensurePricing paths', () => {
   function makeAdapterWith(overrides: Partial<ProviderAdapterConfig>): OswsProviderAdapter {
     const config: ProviderAdapterConfig = {

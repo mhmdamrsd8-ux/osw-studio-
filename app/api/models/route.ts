@@ -160,8 +160,24 @@ export async function POST(request: NextRequest) {
             const ollamaResponse = await fetch(`http://127.0.0.1:11434/api/tags`);
             if (ollamaResponse.ok) {
               const ollamaData = await ollamaResponse.json();
-              // Ollama returns models array directly in the response
-              models = ollamaData.models?.map((m: any) => m.name) || [];
+              const names: string[] = ollamaData.models?.map((m: any) => m.name) || [];
+              // The trained limit from /api/show. The window a model is actually loaded with is
+              // the provider's context-length setting, which bounds compaction on the client.
+              models = await Promise.all(names.map(async (id) => {
+                try {
+                  const show = await fetch(`http://127.0.0.1:11434/api/show`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: id }),
+                  });
+                  const info = show.ok ? ((await show.json())?.model_info ?? {}) : {};
+                  const entry = Object.entries(info).find(([k]) => k.endsWith('.context_length'));
+                  const trained = entry && typeof entry[1] === 'number' ? entry[1] : undefined;
+                  return trained ? { id, contextLength: trained } : { id };
+                } catch {
+                  return { id };
+                }
+              }));
             }
           } catch (error) {
             logger.debug('Ollama models fetch failed (server not running?):', error);
@@ -214,7 +230,8 @@ export async function POST(request: NextRequest) {
             models = (geminiData.models || [])
               .filter((m: any) =>
                 m.supportedGenerationMethods?.includes('generateContent') &&
-                /gemini/i.test(m.name)
+                /gemini/i.test(m.name) &&
+                !/image|tts|transcribe|robotics|computer-use|omni|deep-research|antigravity/i.test(m.name)
               )
               .map((m: any) => ({
                 id: m.name.replace('models/', ''),

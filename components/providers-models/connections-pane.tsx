@@ -19,6 +19,8 @@ import { ConnectionBadge } from '@/components/settings/connection-badge';
 import { loadProviderModels } from '@/lib/llm/models/model-catalog';
 import { CodexAuthPanel } from '@/components/settings/codex-auth-panel';
 import { HFAuthPanel } from '@/components/settings/hf-auth-panel';
+import { OllamaPreflight } from '@/components/settings/ollama-preflight';
+import { LocalContextLength } from '@/components/settings/local-context-length';
 import { Drawer } from './drawer';
 import { SearchConnectionsSection } from './search-connections';
 import type { ProviderId } from '@/lib/llm/providers/types';
@@ -174,7 +176,10 @@ function ConnectConfigBody({ providerId, onConnected, onBack }: ConnectConfigBod
               <code className="text-xs">{providerConfig.baseUrl}</code>
             </p>
           )}
+          {providerId === 'ollama' && <OllamaPreflight />}
         </div>
+
+        <LocalContextLength providerId={providerId} />
 
         <div>
           <Label htmlFor="local-key">
@@ -905,6 +910,8 @@ function EditConfigBody({ providerId, onDone, onDisconnected }: EditConfigBodyPr
         <p className="text-xs text-muted-foreground">
           Local providers are always available when running. Disconnect removes them from the connections list.
         </p>
+        <LocalContextLength providerId={providerId} />
+        {providerId === 'ollama' && <OllamaPreflight />}
         <div className="flex justify-end pt-2">
           <Button size="sm" onClick={onDone}>Done</Button>
         </div>

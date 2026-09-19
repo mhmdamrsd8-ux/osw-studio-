@@ -155,26 +155,21 @@ npm install --force
    - OpenAI: status.openai.com
    - Anthropic: status.anthropic.com
 
-### CORS Errors (Local Providers)
+### Local Providers (Ollama, LM Studio, llama.cpp)
+
+OSW Studio's server talks to a local model server on your behalf, so the model server must run on the same machine as OSW Studio. The HuggingFace Space cannot reach a model server on your computer; use the desktop app or a self-hosted instance for local models.
 
 **Symptoms**:
 ```
-Access to fetch blocked by CORS policy
+Could not reach Ollama at http://127.0.0.1:11434/v1
 ```
 
 **Solutions**:
-1. **Ollama**: Ensure CORS enabled
-```bash
-# Set environment variable
-export OLLAMA_ORIGINS="*"
-# Restart Ollama
-```
+1. **Start the server**: `ollama serve` (Ollama), or start the local server in LM Studio
+2. **Run the check**: Settings → Connections → Add a provider → Ollama → Check setup (or open the Ollama card once connected). It reports whether Ollama answers, whether the selected model is pulled, whether the model supports tool calls, and the context length it will be loaded with, each with the command that fixes it.
+3. **Pick a model with tool calls**: tasks need them. `ollama pull qwen3:4b` is a small one that works.
 
-2. **LM Studio**: Enable CORS in settings
-   - Settings → Server → Enable CORS
-
-3. **Use proxy mode**:
-   - OSW Studio has proxy routes that bypass CORS
+Each local provider has a **Context length** setting on its connection (default 32,768 tokens). For Ollama, OSW Studio loads the model with that window; Ollama's own default of 4k tokens cuts off the start of the instructions and the model works from a fragment. For LM Studio and llama.cpp the window is set when the model is loaded or the server started, so set the value to match. In every case OSW Studio compacts the conversation to stay inside it. Lower it if a model does not fit in memory.
 
 ---
 

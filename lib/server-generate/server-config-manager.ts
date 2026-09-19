@@ -60,6 +60,10 @@ export class ServerConfigManager {
     return this.params.compactionLimit;
   }
 
+  getLocalContextLength(_provider: ProviderId): number | undefined {
+    return this.params.localContextLength;
+  }
+
   getModelContextLengthFromCache(_provider: ProviderId, modelId: string): number | undefined {
     return this.params.cachedModels?.find((m) => m.id === modelId)?.context_length;
   }

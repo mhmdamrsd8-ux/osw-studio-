@@ -80,10 +80,18 @@ const MODELS_DEV_FIXTURE = {
 beforeEach(() => {
   fetchMock = vi.fn(async (url: unknown) => {
     const u = String(url);
+    if (u.includes('127.0.0.1:11434/api/show')) return jsonResponse({ model_info: { 'llama.context_length': 131072 } });
     if (u.includes('127.0.0.1:11434')) return jsonResponse({ models: [{ name: 'llama3' }] });
     if (u.includes('api.example.com')) return jsonResponse({ data: [{ id: 'gpt-x' }] });
     if (u.includes('/backend-api/codex/models')) return jsonResponse(CODEX_FIXTURE);
     if (u.includes('models.dev')) return jsonResponse(MODELS_DEV_FIXTURE);
+    if (u.includes('generativelanguage.googleapis.com')) return jsonResponse({ models: [
+      { name: 'models/gemini-3.8-flash', supportedGenerationMethods: ['generateContent'], inputTokenLimit: 1048576 },
+      { name: 'models/gemini-3.1-flash-image', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-2.5-flash-preview-tts', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-embedding-2', supportedGenerationMethods: ['embedContent'] },
+      { name: 'models/gemma-4-31b-it', supportedGenerationMethods: ['generateContent'] },
+    ] });
     return jsonResponse({});
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -109,7 +117,8 @@ describe('/api/models SSRF guard wiring', () => {
     const res = await POST(makeReq({ provider: 'ollama', baseUrl: 'http://localhost:11434/v1' }));
     const data = await res.json();
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:11434/api/tags');
-    expect(data.models).toContain('llama3');
+    // Each model carries its trained limit; the loaded window is the provider setting.
+    expect(data.models).toEqual([{ id: 'llama3', contextLength: 131072 }]);
   });
 });
 
@@ -224,5 +233,16 @@ describe('/api/models opencode-go discovery', () => {
     const res = await POST(makeReq({ provider: 'opencode-go', apiKey: 'sk-x' }));
     const data = await res.json();
     expect(data.models).toEqual([]);
+  });
+});
+
+describe('/api/models Gemini discovery', () => {
+  it('lists only chat-capable Gemini models', async () => {
+    const res = await POST(makeReq({ provider: 'gemini', apiKey: 'AIza-x' }));
+    const data = await res.json();
+    // Image, speech and embedding models answer generateContent or not at all, but none of
+    // them can run a task; Gemma is not Gemini.
+    expect(data.models.map((m: { id: string }) => m.id)).toEqual(['gemini-3.8-flash']);
+    expect(data.models[0].contextLength).toBe(1048576);
   });
 });

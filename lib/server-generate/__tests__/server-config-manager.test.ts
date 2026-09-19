@@ -79,4 +79,10 @@ describe('ServerConfigManager', () => {
     expect(session!.totalCost).toBeCloseTo(0.03);
     expect(session!.requestCount).toBe(2);
   });
+
+  it('reports the local context length the client sent, or nothing', () => {
+    expect(config.getLocalContextLength('openai')).toBeUndefined();
+    const local = new ServerConfigManager({ ...baseParams, provider: 'ollama', localContextLength: 65536 }, 'task-1');
+    expect(local.getLocalContextLength('ollama')).toBe(65536);
+  });
 });

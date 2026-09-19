@@ -46,6 +46,8 @@ export interface ServerGenerationParams {
   reasoningEnabled?: boolean;
   compactionEnabled?: boolean;
   compactionLimit?: number;
+  /** Context length a local provider is loaded with (see lib/llm/local-context.ts). */
+  localContextLength?: number;
   debugStreamEnabled?: boolean;
   modelPricing?: Record<string, { prompt: number; completion: number }>;
   cachedModels?: Array<{ id: string; name: string; context_length?: number }>;

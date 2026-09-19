@@ -77,6 +77,7 @@ export const EVENT_CATALOG = {
   interview_template_deleted: { category: 'features', disclosure: 'That custom skills or templates are created or deleted (counts only, never names or contents)' },
   model_template_created:     { category: 'features', disclosure: 'That custom skills or templates are created or deleted (counts only, never names or contents)' },
   model_template_deleted:     { category: 'features', disclosure: 'That custom skills or templates are created or deleted (counts only, never names or contents)' },
+  preflight_result:   { category: 'features', disclosure: 'Whether a local model server check passed and which checks failed (never endpoints or model names)' },
   connection_added:   { category: 'features', disclosure: 'Which provider connections are added or removed and how (sign-in, pasted key, local server; never keys or endpoints)' },
   connection_removed: { category: 'features', disclosure: 'Which provider connections are added or removed (never keys or endpoints)' },
   image_attached:     { category: 'features', disclosure: 'Whether an image was attached to a chat message (not the image itself)' },

@@ -10,6 +10,8 @@ import { applyReasoningReplayPolicy } from '@/lib/llm/reasoning-replay';
 import { consolidateSystemMessages } from '@/lib/llm/consolidate-system-messages';
 import { logger } from '@/lib/utils';
 import { handleCodexGeneration } from '@/lib/llm/codex-adapter';
+import { buildGeminiRequestBody, createGeminiToCompletionsTransformer, geminiToCompletionsResponse } from '@/lib/llm/gemini-adapter';
+import { buildOllamaChatBody, createOllamaToCompletionsTransformer, messagesToOllama, ollamaToCompletionsResponse, ollamaOrigin, resolveOllamaNumCtx } from '@/lib/llm/ollama-adapter';
 
 // Helper to extract text content from string or ContentBlock[]
 function getTextContent(content: string | ContentBlock[]): string {
@@ -49,85 +51,30 @@ function toAnthropicContent(content: string | ContentBlock[]): any {
   });
 }
 
-// Transform messages to Gemini format
-function toGeminiContents(messages: LLMMessage[]): { contents: any[]; systemInstruction?: any } {
-  let systemInstruction: any = undefined;
-  const contents: any[] = [];
-
-  for (const msg of messages) {
-    if (msg.role === 'system') {
-      systemInstruction = { parts: [{ text: getTextContent(msg.content) }] };
-      continue;
+// Ollama reports a model's trained context length via /api/show; the value picks the
+// num_ctx the model is loaded with. Cached per process: the answer never changes for a
+// given model tag, and the lookup would otherwise run on every turn.
+const ollamaContextCache = new Map<string, number | undefined>();
+async function ollamaModelContextLength(origin: string, model: string): Promise<number | undefined> {
+  const key = `${origin}|${model}`;
+  if (ollamaContextCache.has(key)) return ollamaContextCache.get(key);
+  let length: number | undefined;
+  try {
+    const res = await fetch(`${origin}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: model }),
+    });
+    if (res.ok) {
+      const info = (await res.json())?.model_info ?? {};
+      const entry = Object.entries(info).find(([k]) => k.endsWith('.context_length'));
+      if (entry && typeof entry[1] === 'number') length = entry[1];
     }
-
-    const role = msg.role === 'assistant' ? 'model' : 'user';
-    const parts: any[] = [];
-
-    if (typeof msg.content === 'string') {
-      parts.push({ text: msg.content });
-    } else if (Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === 'text') {
-          parts.push({ text: block.text });
-        } else if (block.type === 'image_url') {
-          try {
-            const { mediaType, data } = parseDataUrl(block.image_url.url);
-            parts.push({ inline_data: { mime_type: mediaType, data } });
-          } catch {
-            logger.warn('[API] Failed to parse image data URL for Gemini');
-          }
-        }
-      }
-    }
-
-    if (parts.length > 0) {
-      contents.push({ role, parts });
-    }
+  } catch {
+    // Unreachable or unknown model: the chat request that follows reports it properly.
   }
-
-  return { contents, systemInstruction };
-}
-
-// Build Gemini-format request body from the standard OpenAI-format parameters
-function buildGeminiRequestBody(
-  messages: LLMMessage[],
-  options: {
-    maxTokens?: number;
-    temperature?: number;
-    tools?: any[];
-    toolChoice?: any;
-    reasoning?: any;
-  }
-): Record<string, unknown> {
-  const { contents, systemInstruction } = toGeminiContents(messages);
-  const body: Record<string, unknown> = { contents };
-
-  if (systemInstruction) {
-    body.system_instruction = systemInstruction;
-  }
-
-  const generationConfig: Record<string, unknown> = {
-    maxOutputTokens: options.maxTokens || 4096,
-    temperature: options.temperature ?? 0.7,
-  };
-
-  if (options.reasoning) {
-    generationConfig.thinkingConfig = { thinkingBudget: options.reasoning.max_tokens || 4096 };
-  }
-
-  body.generationConfig = generationConfig;
-
-  if (options.tools && options.tools.length > 0) {
-    body.tools = [{
-      function_declarations: options.tools.map((t: any) => ({
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters,
-      })),
-    }];
-  }
-
-  return body;
+  ollamaContextCache.set(key, length);
+  return length;
 }
 
 // Extract images from messages for Ollama (images field at request level)
@@ -159,8 +106,10 @@ function extractOllamaImages(messages: LLMMessage[]): { processedMessages: LLMMe
 }
 
 export async function POST(request: NextRequest) {
+  // Set once the provider is known, for the network-error message in the catch below.
+  let localTarget: { name: string; url: string; hint: string } | undefined;
   try {
-    const { prompt, apiKey: clientApiKey, model, tools, context, messages, tool_choice, provider, max_tokens, reasoning, stream: requestStream, baseUrl: requestBaseUrl, customHeaders: requestCustomHeaders } = await request.json();
+    const { prompt, apiKey: clientApiKey, model, tools, context, messages, tool_choice, provider, max_tokens, reasoning, stream: requestStream, baseUrl: requestBaseUrl, customHeaders: requestCustomHeaders, context_length: requestContextLength } = await request.json();
 
     const selectedProvider: ProviderId = provider || 'openrouter';
     const providerConfig = getProvider(selectedProvider);
@@ -174,6 +123,13 @@ export async function POST(request: NextRequest) {
     // local providers (Ollama/LM Studio/llama.cpp) legitimately point at localhost and are
     // exempt. On hosted instances, network egress filtering blocks DNS-rebinding past this.
     if (customBaseUrl && !providerConfig.isLocal) assertPublicHttpUrl(customBaseUrl);
+    if (providerConfig.isLocal) {
+      localTarget = {
+        name: providerConfig.name,
+        url: customBaseUrl || providerConfig.baseUrl || '',
+        hint: selectedProvider === 'ollama' ? ' (start it with "ollama serve")' : '',
+      };
+    }
 
     if (!prompt && !messages) {
       return NextResponse.json(
@@ -360,7 +316,7 @@ Habits:
     }
 
     const streamEnabled = requestStream !== false;
-    const apiEndpoint = getApiEndpoint(selectedProvider, providerConfig, model, { apiKey, stream: streamEnabled }, customBaseUrl, wireFormat);
+    let apiEndpoint = getApiEndpoint(selectedProvider, providerConfig, model, { apiKey, stream: streamEnabled }, customBaseUrl, wireFormat);
 
     // --- Gemini: build entirely different request body ---
     if (selectedProvider === 'gemini') {
@@ -376,13 +332,11 @@ Habits:
         }
       }
 
-      const modelName = model || '';
-      const needsReasoning = modelName.includes('thinking') || modelName.includes('2.5') || modelName.includes('3-pro');
       const geminiBody = buildGeminiRequestBody(processedMessages, {
+        model: model || '',
         maxTokens: max_tokens,
         temperature: 0.7,
         tools: validTools.length > 0 ? validTools : undefined,
-        reasoning: needsReasoning ? { max_tokens: 4096 } : undefined,
       });
 
       const response = await fetch(apiEndpoint, {
@@ -408,11 +362,10 @@ Habits:
       }
 
       if (!streamEnabled) {
-        const data = await response.json();
-        return NextResponse.json(data);
+        return NextResponse.json(geminiToCompletionsResponse(await response.json()));
       }
 
-      return new Response(response.body, {
+      return new Response(response.body?.pipeThrough(createGeminiToCompletionsTransformer()), {
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -547,10 +500,29 @@ Habits:
       };
     }
 
+    let outgoingBody: Record<string, unknown> = requestBody;
+    if (selectedProvider === 'ollama') {
+      const origin = ollamaOrigin(customBaseUrl || providerConfig.baseUrl || 'http://127.0.0.1:11434');
+      apiEndpoint = `${origin}/api/chat`;
+      outgoingBody = buildOllamaChatBody(processedMessages, {
+        model: String(requestBody.model),
+        stream: streamEnabled,
+        numCtx: resolveOllamaNumCtx(
+          await ollamaModelContextLength(origin, String(requestBody.model)),
+          typeof requestContextLength === 'number' ? requestContextLength : undefined,
+        ),
+        maxTokens: requestBody.max_tokens as number,
+        temperature: requestBody.temperature as number,
+        tools: Array.isArray(requestBody.tools)
+          ? (requestBody.tools as Array<{ function: ToolDefinition }>).map(t => t.function)
+          : undefined,
+      });
+    }
+
     const response = await fetch(apiEndpoint, {
       method: 'POST',
       headers,
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(outgoingBody),
       signal: request.signal,
     });
 
@@ -717,8 +689,8 @@ You can make multiple tool calls in a single response. Always include the tool_c
         }
 
         const fallbackBody: any = {
-          ...requestBody,
-          messages: fallbackMessages
+          ...outgoingBody,
+          messages: selectedProvider === 'ollama' ? messagesToOllama(fallbackMessages) : fallbackMessages
         };
         delete fallbackBody.tools;
         delete fallbackBody.tool_choice;
@@ -748,9 +720,10 @@ You can make multiple tool calls in a single response. Always include the tool_c
           'X-Tool-Fallback': 'json-parsing'
         };
 
-        return new Response(fallbackResponse.body, {
-          headers: fallbackHeaders,
-        });
+        return new Response(
+          selectedProvider === 'ollama' ? fallbackResponse.body?.pipeThrough(createOllamaToCompletionsTransformer()) : fallbackResponse.body,
+          { headers: fallbackHeaders },
+        );
         }
         // Non-local providers: actionable error message
         return NextResponse.json(
@@ -784,7 +757,7 @@ You can make multiple tool calls in a single response. Always include the tool_c
     // Non-streaming: return JSON directly
     if (!streamEnabled) {
       const data = await response.json();
-      return NextResponse.json(data);
+      return NextResponse.json(selectedProvider === 'ollama' ? ollamaToCompletionsResponse(data) : data);
     }
 
     const responseHeaders: Record<string, string> = {
@@ -809,9 +782,10 @@ You can make multiple tool calls in a single response. Always include the tool_c
       }
     }
 
-    return new Response(response.body, {
-      headers: responseHeaders,
-    });
+    return new Response(
+      selectedProvider === 'ollama' ? response.body?.pipeThrough(createOllamaToCompletionsTransformer()) : response.body,
+      { headers: responseHeaders },
+    );
   } catch (error) {
     // Client disconnected — abort is expected, no error response needed
     if (error instanceof Error && error.name === 'AbortError') {
@@ -820,7 +794,9 @@ You can make multiple tool calls in a single response. Always include the tool_c
     const message = error instanceof Error ? error.message : 'Unknown error';
     const isNetwork = /fetch failed|Failed to fetch|NetworkError/i.test(message);
     const friendly = isNetwork
-      ? 'Network error: unable to reach the model API. Check your internet connection or proxy settings.'
+      ? (localTarget
+        ? `Could not reach ${localTarget.name} at ${localTarget.url}. Make sure it is running on the same machine as OSW Studio${localTarget.hint}.`
+        : 'Network error: unable to reach the model API. Check your internet connection or proxy settings.')
       : message;
     return NextResponse.json(
       { error: friendly },

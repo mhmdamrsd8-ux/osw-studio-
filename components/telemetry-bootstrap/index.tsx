@@ -13,7 +13,7 @@ import { TelemetryDisclosure } from '@/components/telemetry-disclosure';
  * deployment mode reports. The key's version re-shows the updated disclosure
  * once to users who saw an older one; users who opted out are never re-prompted.
  */
-const DISCLOSED_KEY = 'osw-telemetry-disclosed-v3';
+const DISCLOSED_KEY = 'osw-telemetry-disclosed-v4';
 
 export function TelemetryBootstrap() {
   const [showDisclosure, setShowDisclosure] = useState(false);

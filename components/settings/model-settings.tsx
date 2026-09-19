@@ -22,6 +22,8 @@ import { getOfferableProviders, getProvider } from '@/lib/llm/providers/registry
 import { CodexAuthPanel } from '@/components/settings/codex-auth-panel';
 import { HFAuthPanel } from '@/components/settings/hf-auth-panel';
 import { ConnectionBadge } from '@/components/settings/connection-badge';
+import { OllamaPreflight } from '@/components/settings/ollama-preflight';
+import { LocalContextLength } from '@/components/settings/local-context-length';
 import { checkHFCapabilities } from '@/lib/auth/hf-auth';
 import { track } from '@/lib/telemetry';
 
@@ -372,6 +374,10 @@ export function ModelSettingsPanel({ onClose, onModelChange, showJudgeModel, onJ
           <p className="font-medium mb-1">Local Provider</p>
           <p>Make sure {providerConfig.name} is running on your machine.</p>
           <p>Default endpoint: <code className="text-xs">{providerConfig.baseUrl}</code></p>
+          <div className="mt-2"><LocalContextLength providerId={selectedProvider} /></div>
+          {selectedProvider === 'ollama' && (
+            <OllamaPreflight />
+          )}
           {selectedProvider === 'lmstudio' && (
             <div className="mt-2 text-xs">
               <p className="font-medium">For tool use support:</p>

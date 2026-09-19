@@ -15,7 +15,7 @@ export function getApiEndpoint(
   if (wireFormat === 'anthropic') {
     return provider === 'anthropic' ? 'https://api.anthropic.com/v1/messages' : `${baseUrl}/messages`;
   } else if (provider === 'gemini') {
-    const geminiModel = model || 'gemini-2.5-flash';
+    const geminiModel = model || 'gemini-3.8-flash';
     const action = options?.stream ? 'streamGenerateContent?alt=sse' : 'generateContent';
     const key = options?.apiKey ? `${options.stream ? '&' : '?'}key=${options.apiKey}` : '';
     return `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:${action}${key}`;

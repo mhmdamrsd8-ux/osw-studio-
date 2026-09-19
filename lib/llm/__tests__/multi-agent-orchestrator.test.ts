@@ -29,6 +29,9 @@ const h = vi.hoisted(() => {
     executorConfigs: [] as any[],
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     coordinatorConfigs: [] as any[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    adapterConfigs: [] as any[],
+    localContextLength: undefined as number | undefined,
   };
 });
 
@@ -53,7 +56,7 @@ vi.mock('../tool-executor', () => ({
 
 vi.mock('../provider-adapter', () => ({
   OswsProviderAdapter: class {
-    constructor(_cfg: unknown) {}
+    constructor(cfg: unknown) { h.adapterConfigs.push(cfg); }
   },
   PausableApiError: class extends Error {
     constructor(
@@ -113,15 +116,16 @@ vi.mock('@/lib/config/storage', () => ({
     getModelPricing: () => null,
     getCachedModels: () => null,
     getCompactionLimit: () => null,
+    getLocalContextLength: () => h.localContextLength,
     getModelContextLengthFromCache: () => null,
     getCurrentSession: () => null,
     isWebSearchConfigured: () => false,
   },
 }));
 
-const registryMock = vi.hoisted(() => ({ usesOAuth: false }));
+const registryMock = vi.hoisted(() => ({ usesOAuth: false, isLocal: false }));
 vi.mock('@/lib/llm/providers/registry', () => ({
-  getProvider: () => ({ apiKeyRequired: false, usesOAuth: registryMock.usesOAuth }),
+  getProvider: () => ({ apiKeyRequired: false, usesOAuth: registryMock.usesOAuth, isLocal: registryMock.isLocal }),
   getModelContextLength: () => 128000,
 }));
 
@@ -482,5 +486,42 @@ describe('MultiAgentOrchestrator result propagation and lifecycle', () => {
     expect(h.coordinatorConfigs.length).toBe(1);
     const cfg = h.coordinatorConfigs[0];
     expect(cfg.compactionConfig.threshold).toBe(Infinity);
+  });
+});
+
+describe('local context length', () => {
+  beforeEach(() => {
+    h.adapterConfigs.length = 0;
+    h.localContextLength = undefined;
+    registryMock.isLocal = false;
+  });
+
+  it('bounds compaction and the request window to the local provider setting', async () => {
+    // The registry says the model takes 128k; the local server was told to load 65,536.
+    registryMock.isLocal = true;
+    h.localContextLength = 65536;
+
+    await new MultiAgentOrchestrator('test-p1').execute('build');
+
+    expect(h.coordinatorConfigs[0].compactionConfig.contextLength).toBe(65536);
+    expect(h.adapterConfigs[0].getLocalContextLength()).toBe(65536);
+  });
+
+  it('uses the default window for a local provider with nothing set', async () => {
+    registryMock.isLocal = true;
+
+    await new MultiAgentOrchestrator('test-p1').execute('build');
+
+    expect(h.coordinatorConfigs[0].compactionConfig.contextLength).toBe(32768);
+    expect(h.adapterConfigs[0].getLocalContextLength()).toBe(32768);
+  });
+
+  it('leaves a cloud provider on its model limit and sends no window', async () => {
+    h.localContextLength = 65536;
+
+    await new MultiAgentOrchestrator('test-p1').execute('build');
+
+    expect(h.coordinatorConfigs[0].compactionConfig.contextLength).toBe(128000);
+    expect(h.adapterConfigs[0].getLocalContextLength()).toBeUndefined();
   });
 });
